@@ -2,6 +2,8 @@
 
 Webapp die security advisories automatiseert: je voert alleen CVE-nummers in, de velden worden zo volledig mogelijk automatisch gevuld uit de publieke CVE-databases. De gegenereerde tekst volgt de briefstructuur van de voorbeeldadvisories (aanhef, aankondiging, Impact, Handelingsperspectieven & Adviezen, Technische Details, afsluiting, geadresseerden, disclaimer).
 
+Deze app is grotendeels vibecode'd. Hij is niet bedoeld om publiek aan het internet te hangen. Zie hoofdstuk **Gebruik** hieronder.
+
 ## Gebruik
 
 1. Open `index.html` in een browser (of serveer de map, bijv. `python3 -m http.server 8080` en ga naar http://localhost:8080).
