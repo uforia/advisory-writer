@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Advisory Writer &mdash; Security Advisories</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230c4a6e'/%3E%3Ctext x='32' y='45' font-family='system-ui,sans-serif' font-size='38' font-weight='700' fill='%23e0f2fe' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Advisory Writer</h1>
+  <p class="subtitle">Genereer security advisories &mdash; vul alleen de CVE's in; de tekstvelden zijn optioneel.</p>
+</header>
+
+<main>
+  <!-- ==================== INPUT ==================== -->
+  <section id="input-panel" class="card">
+    <h2>Invoer</h2>
+
+    <label for="cve-input">CVE's (een per regel of gescheiden door komma's)</label>
+    <textarea id="cve-input" rows="4" placeholder="CVE-2026-123158&#10;CVE-2026-123159"></textarea>
+
+    <div class="form-row">
+      <div>
+        <label for="advisory-title">Advisorytitel <span class="hint">(optioneel, wordt automatisch gegenereerd)</span></label>
+        <input type="text" id="advisory-title" placeholder="Kritieke kwetsbaarheden in nginx">
+      </div>
+      <div>
+        <label for="advisory-ref">Advisorynummer <span class="hint">(optioneel)</span></label>
+        <input type="text" id="advisory-ref" placeholder="ADV-2026-001">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div>
+        <label for="pub-date">Publicatiedatum/tijd</label>
+        <input type="text" id="pub-date">
+      </div>
+      <div>
+        <label for="prioriteit-select">Prioriteit <span class="hint">(handmatig; auto = zwaarste CVSS over alle CVE's)</span></label>
+        <select id="prioriteit-select">
+          <option value="auto">Automatisch (op basis van CVSS)</option>
+          <option value="Laag">Laag</option>
+          <option value="Middel">Middel</option>
+          <option value="Hoog">Hoog</option>
+          <option value="Kritiek">Kritiek</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div>
+        <label for="advisory-versie">Advisoryversie <span class="hint">(standaard 1.0; verhoog bij een herissue, bijv. 1.1)</span></label>
+        <input type="text" id="advisory-versie" placeholder="1.0">
+      </div>
+      <div>
+        <label for="nvd-apikey">NVD API-sleutel <span class="hint">(optioneel; verhoogt de NVD-limiet van 5 naar 50 req/30 s)</span></label>
+        <input type="password" id="nvd-apikey" autocomplete="off" placeholder="gratis aan te vragen op nvd.nist.gov (verplicht bij vele CVE's tegelijk)">
+      </div>
+    </div>
+
+    <details class="options">
+      <summary>Tekstvelden voor de brief <span class="hint">(aanhef, aankondiging, impact, adviezen, geadresseerden)</span></summary>
+
+      <div class="form-row">
+        <div>
+          <label for="aanhef">Aanhef <span class="hint">(optioneel, bijv. "Beste NS-collega,")</span></label>
+          <input type="text" id="aanhef" placeholder="Beste NS-collega,">
+        </div>
+        <div>
+          <label for="meldpunt">Meldpunt <span class="hint">(voor de centralisatie-alinea)</span></label>
+          <input type="text" id="meldpunt" placeholder="NS CERT via cert@ns.nl">
+        </div>
+      </div>
+
+      <label for="opening">Opening <span class="hint">(optionele alinea v&oacute;ór de titel, bijv. "Graag jullie zorgvuldige aandacht voor het onderstaande bericht.")</span></label>
+      <textarea id="opening" rows="2" placeholder="Graag jullie zorgvuldige aandacht voor het urgente onderstaande bericht."></textarea>
+
+      <div class="form-row">
+        <div>
+          <label for="aankondiger">Aangekondigd door <span class="hint">(optioneel; anders vendor uit NVD)</span></label>
+          <input type="text" id="aankondiger" placeholder="Xint en F5/nginx">
+        </div>
+        <div>
+          <label for="aankondiging-datum">Aankondigingsdatum <span class="hint">(optioneel; anders publicatiedatum)</span></label>
+          <input type="text" id="aankondiging-datum" placeholder="18 november 2026">
+        </div>
+        <div>
+          <label for="bijnaam">Bijnaam <span class="hint">(optioneel, bijv. nginx2root)</span></label>
+          <input type="text" id="bijnaam" placeholder="sshhole">
+        </div>
+      </div>
+
+      <label for="impact">Impact <span class="hint">(vrije tekst; anders automatisch genereerde standaardimpact)</span></label>
+      <textarea id="impact" rows="4" placeholder="Een succesvolle aanval kan leiden tot ..."></textarea>
+
+      <label for="handelingsperspectieven">Eigen handelingsperspectieven <span class="hint">&eacute;&eacute;n per regel; worden v&oacute;&oacute;r de standaardadviezen geplaatst (bijv. interne systemen, AKS, RSMAN)</span></label>
+      <textarea id="handelingsperspectieven" rows="3" placeholder="Amazon Kubernetes Service: patch deze meteen.&#10;RSMAN&#10;BodyCam APIs"></textarea>
+
+      <label for="stroomschema">Stroomschema <span class="hint">(optioneel; afbeelding-URL die onder de Handelingsperspectieven &amp; Adviezen komt te staan, bijv. een eigen beslisboom of procesplaatje)</span></label>
+      <input type="text" id="stroomschema" placeholder="https://intranet/plaatjes/advisory-stroom.png">
+
+      <label for="geadresseerden">Geadresseerden <span class="hint">(optioneel; wordt "Deze mail is gestuurd aan: ...")</span></label>
+      <input type="text" id="geadresseerden" placeholder="IT leads, IT managers, BISO's, TISO's, CTI en CSO">
+    </details>
+
+    <div class="form-row buttons">
+      <label class="cache-toggle" title="Opgeslagen CVE-gegevens (1 uur per browsersessie) overslaan en alles opnieuw bij NVD ophalen">
+        <input type="checkbox" id="no-cache"> <span class="hint">Vers ophalen (geen cache)</span>
+      </label>
+      <button id="fetch-btn" class="primary">Ophalen &amp; genereren</button>
+      <button id="copy-btn" class="secondary" disabled>Markdown kopi&euml;ren</button>
+      <button id="download-btn" class="secondary" disabled>.md downloaden</button>
+      <button id="pdf-btn" class="secondary" disabled title="Download de advisory als PDF-bestand (jsPDF); vink &ldquo;PDF via printdialoog&rdquo; aan voor de browserprintdialoog met alle HTML-opmaak">PDF exporteren</button>
+      <button id="pdf-opmaak" class="secondary" disabled title="Download de advisory als PDF met alle HTML-opmaak (tabelkaders, badges en het stroomschema-beeld): html2canvas fotografeert de preview als raster. Tekst is dan niet selecteerbaar; ontbreekt de CDN of faalt het tekenen, dan opent de printdialoog">PDF met opmaak</button>
+      <label class="cache-toggle" title="Genereer de PDF via de browserprintdialoog in plaats van de ingebouwde jsPDF-download (bijv. om vooraf te kijken of de opmaak klopt)">
+        <input type="checkbox" id="pdf-print"> <span class="hint">PDF via printdialoog</span>
+      </label>
+      <button id="share-btn" class="secondary" title="Kopieer een link met de ingevulde CVE's (?cve=...); de ontvanger opent de app met directe generatie">Deellink kopi&euml;ren</button>
+      <button id="reset-btn" class="secondary" title="Wis alle ingevulde velden en herstel de standaardwaarden">Velden wissen</button>
+    </div>
+    <p class="hint">Ingevulde velden worden automatisch onthouden in deze browser (LocalStorage) en bij een volgend bezoek hersteld; het laatste resultaat wordt na herladen teruggezet. Opgehaalde CVE-gegevens worden &eacute;&eacute;n uur per browsersessie gecachet (vink &bdquo;Vers ophalen&ldquo; aan om die te omzeilen). Met &bdquo;Velden wissen&ldquo; keer je terug naar de standaardwaarden.</p>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <p id="disclaimer-status" class="status hint"></p>
+  </section>
+
+  <!-- ==================== ENRICHMENT DATA ==================== -->
+  <section id="data-panel" class="card hidden">
+    <h2>CVE-gegevens <span class="hint">(NVD API 2.0 &mdash; controleer en bewerk waar nodig; de beschrijving is bewerkbaar en de wijziging komt direct in de advisory)</span></h2>
+    <div id="cve-cards"></div>
+  </section>
+
+  <!-- ==================== OUTPUT ==================== -->
+  <section id="output-panel" class="card hidden">
+    <h2>Resultaat</h2>
+    <div class="toggle-row">
+      <button id="tab-preview" class="tab active" aria-pressed="true">Rendered</button>
+      <button id="tab-raw" class="tab" aria-pressed="false">Markdown</button>
+      <button id="regen-btn" class="secondary" disabled title="Bouw de tekst opnieuw uit de ingevulde velden en verwerp handmatige bewerkingen">Opnieuw genereren uit velden</button>
+      <label class="hist-label hint" for="history-select" title="De laatste 8 gegenereerde advisory's in deze browser; herstel bevat ook de briefvelden van dat moment">Geschiedenis:</label>
+      <select id="history-select" class="hist-select" disabled><option value="">(leeg)</option></select>
+      <input type="text" id="hist-label" class="hist-label-input" maxlength="60" disabled
+        placeholder="eigen naam van deze regel"
+        aria-label="Eigen naam voor de geselecteerde geschiedenisregel"
+        title="Geef de geselecteerde geschiedenisregel een eigen naam (bijv. &lsquo;Testomgeving maart&rsquo;). Enter of klik ernaast bewaart; leeg laten maakt de regel weer naamloos.">
+      <button id="hist-del" class="secondary" disabled title="Verwijder het geselecteerde geschiedenisitem">Wis item</button>
+      <button id="hist-clear" class="secondary" disabled title="Wis de volledige geschiedenislijst (het laatste resultaat voor staatsherstel blijft apart bewaard)">Wis alles</button>
+    </div>
+    <div id="advisory-preview" class="preview"></div>
+    <textarea id="advisory-raw" class="raw hidden" rows="30" spellcheck="false"
+      aria-label="Advisorytekst in Markdown, handmatig bewerkbaar"
+      title="Handmatig bewerkbaar; veldwijzigingen bouwen de tekst daarna niet meer over (knop 'Opnieuw genereren uit velden')"></textarea>
+  </section>
+</main>
+
+<footer>
+  <p>Databronnen: <a href="https://nvd.nist.gov/developers/vulnerabilities" target="_blank">NVD API 2.0</a> &middot;
+  <a href="https://cveproject.github.io/docs/api" target="_blank">CVE Program API</a> &middot;
+  <a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank">CISA KEV</a> (actief misbruik) &middot;
+  <a href="https://api.first.org/data/v1/epss" target="_blank">FIRST EPSS</a> (exploitkans).
+  Raadpleeg voor productinformatie de distributeurtrackers (Debian, Ubuntu, Red Hat, SUSE, Fedora en Amazon Linux &mdash; Alpine heeft geen per-CVE-pagina en valt buiten de set). PDF-export via
+  <a href="https://github.com/parallax/jsPDF" target="_blank">jsPDF</a> en, voor de download met HTML-opmaak, <a href="https://html2canvas.hertzen.com/" target="_blank">html2canvas</a> (CDN's; de printdialoog blijft de terugval).</p>
+</footer>
+
+<!-- jsPDF (UMD-build) voor de PDF-download; bij een geblokkeerde of offline
+     CDN is window.jspdf afwezig en valt de PDF-export terug op de
+     browserprintdialoog. jsPDF en html2canvas (hieronder) zijn samen de
+     externe scripts van de app; data blijft bij de eigen API-bronnen.
+     Versie 4.2.1 (was 2.5.1): jsPDF &le; 3.0.4 kent CVE-2025-68428, een
+     pad-traversal in de Node-build van de library (browser niet getroffen,
+     maar een externe bron op een achterhaalde major is onnodig risico); de
+     4.x-release notes melden verder geen breaking changes en de gebruikte
+     API (constructor, text, splitTextToSize, addPage, setPage,
+     getNumberOfPages en save) is in alle versies gelijk.
+     async: app.js hoeft niet op de CDN te wachten, dus de app is bedienbaar
+     zodra de eigen code draait (pdfRoute checkt jsPDF pas op klikmoment).
+     integrity/crossorigin: SRI-pin van dit exacte CDN-bestand (SHA-512 via
+     de cdnjs-API), zodat een wissel of aanval op de toeleveringsketen wordt
+     geblokkeerd in plaats van meegedraaid. -->
+<script async crossorigin="anonymous"
+  integrity="sha512-plOdviVmws4Y3JAvbnpfKb2hVxKM1lCwsi3vmElYRj+tiDLffZ4FVUj5a8vyKJ9pIgl8JCAHEJ4D1iUKBecswg=="
+  src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js"></script>
+<!-- html2canvas (CDN, async + SRI-gepind): benodigd voor de knop "PDF met
+     opmaak" (exportPdfMetOpmaak). Net als bij jsPDF geldt: asynchroon laden
+     blokkeert de start niet, en ontbreekt de bibliotheek (offline, CDN
+     geblokkeerd), dan valt die knop netjes terug op de printdialoog.
+     SRI-hash van de cdnjs-API voor exact dit bestand (1.4.1, de laatste
+     uitgave van het originele html2canvas-project). -->
+<script async crossorigin="anonymous"
+  integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA=="
+  src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

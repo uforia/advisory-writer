@@ -1,0 +1,416 @@
+:root {
+  --bg: #0f172a;
+  --bg-card: #1e293b;
+  --bg-input: #0b1220;
+  --border: #334155;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-dark: #0284c7;
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+header {
+  padding: 2rem 1.5rem 1rem;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.8rem;
+  color: var(--accent);
+}
+
+.subtitle {
+  color: var(--text-muted);
+  margin: 0.25rem 0 0;
+}
+
+main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 1.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1.2rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin: 0.9rem 0 0.3rem;
+  font-size: 0.9rem;
+}
+
+.hint {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+input[type="text"],
+input[type="password"],
+textarea,
+select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+textarea { resize: vertical; font-family: var(--mono); font-size: 0.88rem; }
+
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid var(--accent-dark);
+  outline-offset: 1px;
+}
+
+details.options {
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  background: var(--bg-input);
+}
+
+details.options > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--accent);
+  list-style: none;
+}
+
+details.options > summary::before { content: "\25B8  "; }
+details.options[open] > summary::before { content: "\25BE  "; }
+details.options > summary::-webkit-details-marker { display: none; }
+
+details.options > *:last-child { margin-bottom: 0.6rem; }
+
+.form-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.form-row > * { flex: 1 1 200px; }
+
+.form-row.buttons { margin-top: 1.2rem; }
+
+button {
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 0.6rem 1.2rem;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: background 0.15s, opacity 0.15s;
+}
+
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+button.primary {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) { background: var(--accent); color: #0b1220; }
+
+button.secondary { background: transparent; color: var(--text); }
+
+button.secondary:hover:not(:disabled) { background: var(--border); }
+
+.status {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  min-height: 1.2em;
+  margin: 0.7rem 0 0;
+}
+
+/* ---------- CVE cards ---------- */
+
+#cve-cards { display: flex; flex-direction: column; gap: 1rem; }
+
+.cve-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  background: var(--bg-input);
+}
+
+.cve-card h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--mono);
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.cve-card .desc { color: var(--text-muted); font-size: 0.9rem; margin: 0.3rem 0 0.6rem; }
+
+/* Bewerkbare beschrijving op de CVE-kaart */
+.desc-edit {
+  display: block;
+  margin: 0.3rem 0 0.6rem;
+  border-style: dashed;
+  background: var(--bg-card);
+}
+
+.desc-edit:focus { border-style: solid; }
+
+.cve-card a { color: var(--accent); }
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge.low { background: #14532d; color: #86efac; }
+.badge.medium { background: #713f12; color: #fde047; }
+.badge.high { background: #7c2d12; color: #fdba74; }
+.badge.critical { background: #7f1d1d; color: #fca5a5; }
+.badge.unknown { background: #334155; color: #cbd5e1; }
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.3rem 1.2rem;
+  font-size: 0.85rem;
+  margin-top: 0.4rem;
+}
+
+.meta-grid b { color: var(--text-muted); font-weight: 600; }
+
+/* ---------- CVSS-vakken (v4.0 en v3.1 gescheiden) ---------- */
+
+.cvss-boxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.2rem;
+}
+
+.cvss-box {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  background: var(--bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.cvss-box .label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.cvss-box .na {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.88rem;
+}
+
+.cvss-box .vector {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.cve-card .warn {
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  border-left: 3px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 0.84rem;
+  border-radius: 0 6px 6px 0;
+}
+
+/* ---------- output ---------- */
+
+.toggle-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
+
+.tab {
+  background: transparent;
+  color: var(--text-muted);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* A11y: de tabs gebruiken aria-pressed in plaats van een class, dus de
+   vormgeving sluit daarop aan (de .tab.active-regel blijft als terugval) */
+.tab[aria-pressed="true"] {
+  background: var(--bg-input);
+  color: var(--accent);
+  border-color: var(--accent-dark);
+}
+
+.tab.active { background: var(--bg-input); color: var(--accent); border-color: var(--accent-dark); }
+
+.preview, .raw {
+  background: #f8fafc;
+  color: #0f172a;
+  border-radius: 8px;
+  padding: 1.5rem 2rem;
+  overflow-x: auto;
+}
+
+.preview h1 { font-size: 1.4rem; border-bottom: 3px solid #0369a1; padding-bottom: 0.4rem; }
+.preview h2 { font-size: 1.1rem; margin-top: 1.6rem; color: #0c4a6e; }
+.preview table { border-collapse: collapse; width: 100%; font-size: 0.9rem; margin: 0.6rem 0; }
+.preview th, .preview td { border: 1px solid #cbd5e1; padding: 0.4rem 0.6rem; text-align: left; }
+.preview th { background: #e0f2fe; }
+.preview code { background: #e2e8f0; padding: 0.1rem 0.35rem; border-radius: 4px; font-family: var(--mono); font-size: 0.85em; }
+.preview pre { background: #e2e8f0; padding: 0.8rem; border-radius: 6px; overflow-x: auto; }
+.preview pre code { background: none; padding: 0; }
+.preview blockquote { border-left: 4px solid #f59e0b; margin: 0.8rem 0; padding: 0.4rem 1rem; background: #fffbeb; }
+.preview a { color: #0369a1; }
+.preview hr { border: none; border-top: 1px solid #cbd5e1; }
+/* Stroomschema-afbidding: een breed procesplaatje mag nooit buiten het witte
+   documentblok lopen; height auto houdt de beeldverhouding. */
+.preview img { max-width: 100%; height: auto; }
+
+.raw {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+}
+
+/* Raw is nu een bewerkbare textarea: donker documentblok binnen het witte
+   preview-thema zou raadloos zijn, dus blijft het licht (als de preview) */
+textarea.raw { resize: vertical; min-height: 24rem; }
+textarea.raw:focus { outline: 2px solid var(--accent-dark); }
+
+/* ---------- toggle-row uitbreidingen (regen-knop + geschiedenis) ---------- */
+
+#regen-btn { margin-left: auto; font-size: 0.82rem; padding: 0.4rem 0.8rem; }
+
+.hist-label { align-self: center; white-space: nowrap; margin: 0; }
+
+.hist-select {
+  width: auto;
+  min-width: 16rem;
+  max-width: 24rem;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.5rem;
+}
+
+/* Eigen-naamveld naast de geschiedenisselect: dezelfde maat als de select,
+   niet de volledige breedte uit de veldselectoren hierboven. input.hist-label-
+   input (klasse + element) is bewust: de basisselector input[type="text"]
+   heeft specificiteit (0,1,1) en wint van een kale klasse (0,1,0) op width;
+   met het element erbij wint deze regel op bronvolgorde (later in het bestand). */
+input.hist-label-input {
+  width: auto;
+  min-width: 12rem;
+  max-width: 16rem;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.hist-label-input:disabled {
+  opacity: 0.5;
+}
+
+/* Wis-knoppen naast de geschiedenisselect: kleiner dan de hoofdknoppen */
+#hist-del, #hist-clear {
+  font-size: 0.82rem;
+  padding: 0.35rem 0.6rem;
+  align-self: center;
+}
+
+/* ---------- cache-toggle (checkbox "Vers ophalen") ---------- */
+
+.cache-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cache-toggle input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent-dark);
+  cursor: pointer;
+}
+
+/* De tekst naast het vinkje: halfvet als label (was een inline style in de
+   HTML). .hint zet normaal font-weight 400; dit overschrijft dat binnen de
+   toggle. */
+.cache-toggle .hint {
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  #regen-btn { margin-left: 0; }
+  .hist-select { max-width: none; flex: 1 1 100%; }
+  .hist-label-input { max-width: none; flex: 1 1 100%; }
+}
+
+.hidden { display: none !important; }
+
+footer {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 1.5rem 2rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+footer a { color: var(--accent); }
+
+@media (max-width: 640px) {
+  .form-row > * { flex: 1 1 100%; }
+}
