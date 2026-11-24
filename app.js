@@ -6,7 +6,10 @@
      afsluiting → geadresseerden → Disclaimer
    Data sources (CORS-enabled, no API key needed):
      - NVD API 2.0 : https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=...
-       (optionele API-sleutel verhoogt de limiet; retry/backoff ingebouwd)
+       (optionele API-sleutel verhoogt de limiet; retry/backoff ingebouwd;
+       per beurt gebundeld opgehaald via parameter cveIds, max 20 nummers
+       per chunk, met terugval per nummer voor wat de bundelrespons niet
+       teruggeeft of als de hele bundelcall faalt)
      - CVE Program API (fallback): https://cveawg.mitre.org/api/cve/...
    KEV/SSVC (actief misbruik) komt primair uit de NVD-respons zelf
    (velden cisaExploitAdd/cisaActionDue en metrics.ssvcV*); de KEV-feed is
@@ -34,9 +37,14 @@
    staatsherstel na herladen (LocalStorage), deellink via ?cve=...-parameter,
    CVE-fetchcache (sessionStorage), bewerkbare raw-markdown en een
    geschiedenis van de laatste advisory's, waarin elke regel een eigen naam
-   kan krijgen via het labelveld naast de dropdown. De KEV-/EPSS-verzoeken
+   kan krijgen via het labelveld naast de dropdown; de CVE-records gaan
+   compact de opslag in (compactAdvisory: alleen wat bouwer en kaart nodig
+   hebben, referenties gekapt op de getoonde zes). De KEV-/EPSS-verzoeken
    die bij een herstel op de achtergrond lopen, zijn afbreekbaar: een nieuwe
-   generatie kapt ze af in plaats van er dubbel op na te bouwen.
+   generatie kapt ze af in plaats van er dubbel op na te bouwen. Het
+   knopslot tijdens genereren is gecentraliseerd: generate() schakelt vijf
+   knoppen uit en de finally zet ze voor élke uitkomst weer aan (succes,
+   onverwachte fout en vroegtijdige return bij volledige ophaalmislukking).
    Toegankelijkheid (A11y): de statusbalk is een aria-live-region (meldingen
    als "NVD-limiet bereikt" zijn zo ook voor schermlezers hoorbaar), de
    tab-knoppen zijn toggle-knoppen met aria-pressed, het API-sleutelveld is
@@ -209,7 +217,16 @@ const KEV_FEED_URL =
   "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 
 let kevMap = null;    // cveID -> KEV-entry; null = nog niet geladen / niet beschikbaar
+// Een uitval is géén sessielijm meer: na een afkoelperiode van KEV_RETRY_MS
+// wordt de volgende keer wéér geprobeerd. Zonder die cooldown kon één
+// hiccup bij CISA (of één harde timeout van 30 s) de KEV-regel de rest van
+// het paginabezoek laten missen, ook bij genereren tien minuten later. De
+// cooldown wordt lui gecontroleerd bij binnenkomst van loadKev: verlopen,
+// dan wordt kevFailed gereset en volgt een gewone poging; de AbortError van
+// een afgebroken verzoek telt nog steeds nooit als uitval.
 let kevFailed = false;
+let kevFailedAt = 0;
+const KEV_RETRY_MS = 5 * 60 * 1000;
 
 // De KEV-feed is meerdere MB; de (compacte) lijst wordt daarom één uur in
 // sessionStorage gecachet, zodat een herladen pagina de feed niet opnieuw
@@ -243,7 +260,8 @@ function kevCacheSave() {
 // de opbouw achterhaald en wordt de download gekapt. Afbreken is géén uitval:
 // kevFailed blijft uit en de volgende beurt probeert het gewoon opnieuw.
 async function loadKev(signaal) {
-  if (kevMap || kevFailed) return; // één keer per paginabezoek
+  if (kevFailed && Date.now() - kevFailedAt >= KEV_RETRY_MS) kevFailed = false; // cooldown verlopen
+  if (kevMap || kevFailed) return;
   if (kevCacheLoad()) return;      // verse cache uit deze browsersessie
   try {
     const data = await fetchJson(KEV_FEED_URL, { tries: 1, signal: signaal });
@@ -252,10 +270,12 @@ async function loadKev(signaal) {
       kevCacheSave();
     } else {
       kevFailed = true;
+      kevFailedAt = Date.now();
     }
   } catch (e) {
     if (e.name === "AbortError") return; // afgebroken door een nieuwe generatie
-    kevFailed = true; // feed niet bereikbaar: KEV-regel valt weg
+    kevFailed = true; // feed niet bereikbaar: KEV-regel valt weg (tot de cooldown)
+    kevFailedAt = Date.now();
   }
 }
 
@@ -325,7 +345,11 @@ const EPSS_TTL_MS = 24 * 60 * 60 * 1000;
 // { id: { score, percentile } }, ook voor "bekend, niet in model"
 // ({ score: null }), zodat zoiets niet elke beurt opnieuw wordt opgevraagd.
 let epssScores = null;  // null = nog niet uit sessionStorage gelezen
-let epssFailed = false; // deze browsersessie niet meer proberen (als kevFailed)
+// Zelfde afkoelperiode als bij de KEV-feed: een uitval (of één harde
+// timeout) kost de EPSS-regel vijf minuten, niet de hele browsersessie.
+let epssFailed = false;
+let epssFailedAt = 0;
+const EPSS_RETRY_MS = 5 * 60 * 1000;
 
 function epssLezen() {
   if (epssScores) return epssScores;
@@ -384,6 +408,7 @@ function epssUitRespons(data) {
 // in één gebundelde call. Het vink "Vers ophalen" geldt hier ook: dan worden
 // alle nummers opnieuw opgevraagd en de cache overschreven.
 async function laadEpss(ids, signaal) {
+  if (epssFailed && Date.now() - epssFailedAt >= EPSS_RETRY_MS) epssFailed = false; // cooldown verlopen
   const cache = epssLezen();
   const vers = typeof noCacheInput !== "undefined" && noCacheInput && noCacheInput.checked;
   const open = [...new Set(ids)].filter((id) => vers || !cache[id]);
@@ -397,6 +422,7 @@ async function laadEpss(ids, signaal) {
   } catch (e) {
     if (e.name === "AbortError") return; // afgebroken: geen uitval, volgende beurt opnieuw
     epssFailed = true; // regel en badge vallen weg; status meldt het eenmalig
+    epssFailedAt = Date.now();
   }
 }
 
@@ -780,6 +806,49 @@ function bestReferences(cve) {
     .slice(0, 6);
 }
 
+// Compacte kopie van een CVE voor de browseropslag (geschiedenis én
+// staatsherstel): een volledige NVD-record is tienduizenden tekens, waarvan
+// de bouwer en de kaart het grootste deel nooit gebruiken — references
+// (soms honderden regels), beschrijvingen in elke taal en analytische
+// velden als dateModified en evaluations. De kopie bevat precies wat
+// buildMarkdown en renderCveCards nodig hebben: identiteit en status, de
+// CVSS-metrics, weaknesses, affected/configurations (product en patch),
+// publicatiedatum en de KEV-velden. Referenties worden gekapt op dezelfde
+// zes die de advisory zelf toont (bestReferences), beschrijvingen tot het
+// Engelse exemplaar plus het eerste (de valroute van bestDescription).
+// De originele objecten in de CVE-fetchcache blijven onaangeroerd: het is
+// een níeuw object, alleen de sub-arrays worden gedeeld (nooit gemuteerd).
+// Opgeslagen compacte items herstellen exact dezelfde advisory: herhaalde
+// compactie (bijv. kopiëren ná een herstel) levert opnieuw exact hetzelfde
+// object op.
+function compactAdvisory(c) {
+  if (c._fetchFailed) return { id: c.id, _fetchFailed: true }; // mislukte stub: niets te compacteren
+  const d = Array.isArray(c.descriptions) ? c.descriptions : [];
+  // Eerste beschrijving plus het Engelse exemplaar (de volgorde van d blijft
+  // voorop staan, zodat herhaalde compactie — bijv. kopiëren ná een herstel
+  // — exact hetzelfde object oplevert); bestDescription kiest daarbinnen
+  // zelf het Engelse exemplaar, dus de advies-tekst is volgorde-onafhankelijk.
+  const besch = [...new Set([d[0], d.find((x) => x && x.lang === "en")].filter(Boolean))];
+  const uit = {
+    id: c.id,
+    descriptions: besch,
+    references: bestReferences(c), // max 6, Vendor Advisory/Patch eerst — als de advisory zelf
+    metrics: c.metrics,
+    weaknesses: c.weaknesses,
+    affected: c.affected,
+    configurations: c.configurations,
+    published: c.published,
+    vulnStatus: c.vulnStatus,
+    cisaExploitAdd: c.cisaExploitAdd,
+    cisaActionDue: c.cisaActionDue,
+    _source: c._source,
+    _state: c._state,
+  };
+  if (c._descEdit != null) uit._descEdit = c._descEdit; // handmatige beschrijving blijft
+  for (const k of Object.keys(uit)) if (uit[k] === undefined) delete uit[k];
+  return uit;
+}
+
 // Referenties per CVE groeperen met een totaalplafond: drie CVE's konden
 // samen ~18 links in één platte lijst opleveren, waar de voorbeeldadvisories
 // een korte, gegroepeerde lijst laten zien. Max PER_CVE per CVE, maximaal
@@ -935,7 +1004,13 @@ async function fetchJson(url, { tries = 3, baseDelay = 1200, headers = {}, signa
           { noRetry: true }
         );
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // 4xx is een permanente fout (typo, onbekend nummer, ongeldige
+        // API-sleutel): opnieuw proberen binnen enkele seconden lost die niet
+        // op, dus niet doen - de aanroeper valt meteen terug. 5xx is
+        // vluchtig (NVD-hiccup): die gaat door naar de retry hieronder.
+        throw Object.assign(new Error(`HTTP ${res.status}`), { noRetry: res.status < 500 });
+      }
       return await res.json();
     } catch (e) {
       lastErr = e;
@@ -957,6 +1032,32 @@ async function fetchNvd(cveId) {
   );
   if (!data.vulnerabilities?.length) throw new Error("niet gevonden in NVD");
   return data.vulnerabilities[0].cve;
+}
+
+// Gebundelde variant van fetchNvd: één verzoek voor meerdere nummers via de
+// parameter cveIds (comma-gescheiden; de API staat er 100 toe, NVD
+// Developers - Vulnerability API). Het chunkplafond van de aanroeper is
+// lager: elke CVE-record is tienduizenden tekens en één respons moet binnen
+// de harde timeout van 30 s passen. Wat NVD niet teruggeeft, ontbreekt in
+// de Map; één onbekend nummer kan bovendien de hele bundelrespons laten
+// mislukken. De aanroeper (generateUitvoeren) valt in beide gevallen terug
+// op fetchCve per nummer, dus de uitvalafhandeling (CVE Program-backstop,
+// "niet gevonden") is identiek aan toen.
+const NVD_BATCH_MAX = 20;
+
+async function fetchNvdBatch(cveIds) {
+  const key = apiKeyInput.value.trim();
+  const data = await fetchJson(
+    `https://services.nvd.nist.gov/rest/json/cves/2.0?cveIds=${cveIds.join(",")}`,
+    // Optionele API-sleutel: verhoogt de limiet van 5 naar 50 requests/30 s.
+    { headers: key ? { apiKey: key } : {} }
+  );
+  const out = new Map();
+  for (const v of data.vulnerabilities || []) {
+    const id = v?.cve?.id;
+    if (id) out.set(String(id).toUpperCase(), v.cve);
+  }
+  return out;
 }
 
 function normalizeCnaMetrics(cna) {
@@ -1435,12 +1536,14 @@ function historyPush() {
     markdown: lastMarkdown,
     manual: manualEdits,
     fields: captureFields(), // veldwaarden van dit moment, voor trouw herstel
-    advisories,
+    advisories: advisories.map(compactAdvisory), // compact: alleen wat herstel nodig heeft
   });
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX), jsonZonderCacheVlag));
   } catch {
-    // quota: probeer met de helft van de regels (de CVE-objecten zijn groot)
+    // quota: probeer met minder regels (compacte records zijn al veel kleiner
+    // dan de volledige NVD-objecten, maar acht regels met grote CVSS-metrics
+    // en configurations kunnen de 5 MB alsnog raken)
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, 3), jsonZonderCacheVlag)); } catch { /* opgegeven */ }
   }
   renderHistory();
@@ -1558,7 +1661,8 @@ const STATE_KEY = "advisory-writer:state-v1";
 function saveState() {
   try {
     localStorage.setItem(STATE_KEY, JSON.stringify(
-      { advisories, markdown: lastMarkdown, manual: manualEdits }, jsonZonderCacheVlag));
+      { advisories: advisories.map(compactAdvisory), markdown: lastMarkdown, manual: manualEdits },
+      jsonZonderCacheVlag));
   } catch { /* te groot of geblokkeerd: niet opslaan */ }
 }
 
@@ -1713,9 +1817,19 @@ async function generate() {
     console.error("Advisory Writer: onverwachte fout tijdens genereren", e);
     setStatus(`Genereren mislukt door een onverwachte fout: ${e.message}.`, true);
   } finally {
-    // Punt 4 schone run: de genereerknop wordt altíjd weer bedienbaar,
-    // ook toen een onverwachte fout (bijv. een renderingbug) de run afbrak.
+    // Punt 4 schone run, uitgebreid door fix 2: álle vijf knoppen die
+    // generate() hierboven uitschakelt worden altíjd weer bedienbaar — bij
+    // succes, bij een onverwachte fout (bijv. een renderingbug) én bij de
+    // vroegtijdige return bij een volledige ophaalmislukking. Daarvoor
+    // herstelde deze finally alleen de genereerknop en de andere vier zich
+    // pas in de geslaagde afloop van generateUitvoeren: na een onverwachte
+    // fout of een volledige mislukking bleven kopiëren, downloaden en beide
+    // PDF-knoppen op slot staan tot een geslaagde beurt.
     fetchBtn.disabled = false;
+    copyBtn.disabled = false;
+    downloadBtn.disabled = false;
+    pdfBtn.disabled = false;
+    if (pdfOpmaakBtn) pdfOpmaakBtn.disabled = false;
   }
 }
 
@@ -1742,11 +1856,39 @@ async function generateUitvoeren(ids, genegeerd) {
   const uitCacheVooraf = ids.length - netCount;
   const meervoud = ids.length === 1 ? "" : "'s";
   setStatus(`Ophalen van ${ids.length} CVE${meervoud} (${netCount} op te halen${uitCacheVooraf ? `, ${uitCacheVooraf} uit cache` : ""})...`);
+  // Gebundeld ophalen: de nummers die het netwerk opgaan, verdwijnen in
+  // chunks van NVD_BATCH_MAX in één NVD-verzoek (parameter cveIds) in plaats
+  // van één verzoek per nummer. Acht nummers kosten daarmee één verzoek in
+  // plaats van acht: de beurt wordt korter en het 5-per-30s-venster gespaard.
+  // Chunks worden onderling wél vertraagd (chunkindex × stap), zodat de
+  // ratelimit-correctheid van nvdStapMs behouden blijft. Wat de bundelrespons
+  // niet teruggeeft — bijvoorbeeld een pas gemeld nummer dat NVD nog niet
+  // kent — en een compleet mislukte bundelcall, krijgt de oude route-per-CVE
+  // inclusief de CVE-Program-backstop; cachede nummers doen niet mee.
+  const netIds = ids.filter((id) => netIdx.has(id));
+  const chunks = [];
+  for (let i = 0; i < netIds.length; i += NVD_BATCH_MAX) chunks.push(netIds.slice(i, i + NVD_BATCH_MAX));
+  const chunkBelofte = chunks.map((chunk, k) => {
+    const p = (async () => {
+      if (k > 0) await new Promise((r) => setTimeout(r, k * stap));
+      return await fetchNvdBatch(chunk);
+    })().catch(() => new Map()); // bundel mislukt: alle nummers vallen terug
+    return p;
+  });
+  const chunkVanId = new Map();
+  chunks.forEach((chunk, k) => { for (const id of chunk) chunkVanId.set(id, k); });
   const results = await Promise.allSettled(ids.map(async (id) => {
-    const n = netIdx.get(id);
-    if (n > 0) await new Promise((r) => setTimeout(r, n * stap));
     try {
-      return await fetchCve(id);
+      const k = chunkVanId.get(id);
+      if (k === undefined) return await fetchCve(id); // cache-hit: direct teruggeven
+      const cve = (await chunkBelofte[k]).get(id);
+      if (cve) {
+        cve._source = "NVD";
+        delete cve._cached;
+        cveCacheSet(id, cve); // volgende beurt is ook per nummer cache-raak
+        return cve;
+      }
+      return await fetchCve(id); // ontbreekt in de bundel: route-per-nummer
     } finally {
       voltooid += 1;
       setStatus(`Ophalen ${id} — ${voltooid}/${ids.length} voltooid...`);
@@ -1767,7 +1909,7 @@ async function generateUitvoeren(ids, genegeerd) {
     advisories = [];
     setStatus(`Ophalen mislukt voor: ${failed.join(", ")}. Controleer de nummers en/of netwerktogang.` +
       (genegeerd.length ? ` Niet als CVE herkend: ${genegeerd.join(", ")}.` : ""), true);
-    return; // de finally in generate() maakt de knop weer bedienbaar
+    return; // de finally in generate() maakt alle knoppen weer bedienbaar
   }
 
   // KEV-feed is terugval: alleen ophalen als de NVD-respons voor een CVE
@@ -1787,10 +1929,9 @@ async function generateUitvoeren(ids, genegeerd) {
   refreshOutput();
   outputPanel.classList.remove("hidden");
 
-  copyBtn.disabled = false;
-  downloadBtn.disabled = false;
-  pdfBtn.disabled = false;
-  if (pdfOpmaakBtn) pdfOpmaakBtn.disabled = false;
+  // De knoppen worden hier niet meer hersteld (fix 2): de finally van
+  // generate() doet dat voor élke uitkomst, en vangt daarmee ook de
+  // vroegtijdige return hieronder (volledige ophaalmislukking) op.
   historyPush(); // resultaat bewaren in de geschiedenis (dedup vooraf)
 
   const ok = advisories.filter((c) => !c._fetchFailed).length;
@@ -1810,9 +1951,20 @@ async function generateUitvoeren(ids, genegeerd) {
 fetchBtn.addEventListener("click", generate);
 
 copyBtn.addEventListener("click", async () => {
-  await navigator.clipboard.writeText(lastMarkdown);
-  setStatus("Markdown gekopieerd naar klembord.");
-  historyPush(); // handmatige correcties bij het kopiëren vastleggen
+  // De Clipboard-API bestaat alleen in beveiligde context (https of
+  // localhost): op http:// of in een oude browser is navigator.clipboard
+  // undefined en gooit writeText ter plekke. Zonder deze guard gaf een klik
+  // dan alleen een ongevangen rejection in de console zonder enige status-
+  // feedback; de deellink-knop ving dat al af, nu doet de kopieerknop dat
+  // ook. De tekst is in dat geval nog steeds bereikbaar via downloaden en
+  // de PDF-routes.
+  try {
+    await navigator.clipboard.writeText(lastMarkdown);
+    setStatus("Markdown gekopieerd naar klembord.");
+    historyPush(); // handmatige correcties bij het kopiëren vastleggen
+  } catch {
+    setStatus("Kopiëren mislukt: klembord niet beschikbaar (de app vereist https of localhost).", true);
+  }
 });
 
 // Deellink: kopieert een URL met de huidige CVE-lijst (?cve=...); de app
