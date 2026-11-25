@@ -5,7 +5,7 @@
    KEV/SSVC-misbruikstatus, impactafleiding uit CVSS-vector, productopsomming
    en buildMarkdown-output (titel, patch-/misluktregels, CVSS-tabel, gegroepeerde
    referenties), tijdnotatie (Europe/Amsterdam), mislukt-ophalen-onderscheiding,
-   CVE-status, CVE-invoervalidatie, NVD-rate-limit (cache-bewuste indexering),
+   CVE-status, CVE-invoervalidatie, NVD-rate-limit (cache-bewuste netwerkset),
    fetchJson (429 direct, 4xx permanent zonder retry, 5xx met retry, harde
    timeout), de CVE-fetchcache (incl. "Vers ophalen"), de geschiedenis
    (dedup, plafond, herstel) en de voortgangsmelding/herkenningshint in
@@ -80,7 +80,22 @@
    voorkeursvolgorde, analytische ruis als dateModified en evaluations
    vervalt, _descEdit blijft, hercompactie is een no-op en buildMarkdown
    levert vóór en ná compactie dezelfde advisory — dynamisch gecheckt via
-   de geschiedenis-JSON).
+   de geschiedenis-JSON), plus de plaatjeswacht vóór de raster-PDF (een
+   ladend beeld in de verborgen kopie wordt eager gezet en de export wacht
+   tot het is afgewerkt vóórdat html2canvas tekent en de kopposities
+   worden gemeten — dynamisch getest; de cap van 3 s en de gedeelde
+   helper-check volgen uit de printdialoogtests en de broncheck), plus de
+   parallelle KEV-/EPSS-fase (de EPSS-call start terwijl de trage KEV-feed
+   nog loopt — deterministisch getest via een start-/klaargebeurtenissenlijst
+   in de fetch-stub; beide resultaten komen alsnog volledig in de advisory),
+   plus de zichtbare stroomschema-weigering (helper stroomWaarschuwing noemt
+   schema en URL bij een ongeldig schema — leeg en toegestaan leveren niets
+   op, de volledige ![...](...)-vorm meldt het binnenschema — en de
+   statusbalk toont de weigering bij live-herbouw en in de afsluitende
+   generatiemelding, met één keer een herstelbevestiging), plus de
+   deellink-basis op file:// (origin "null" geeft geen null/-voorvoegsel
+   meer, oude query en hash vallen weg; op http(s) blijft de vorm exact
+   zoals voorheen — dynamisch getest via de geregistreerde klikhandler).
    Run: node test/test-ui.js   (vanuit de projectmap) */
 "use strict";
 
@@ -99,7 +114,10 @@ const stubEl = () => {
   // setAttribute en addEventListener zijn geen noop meer: de a11y-test
   // controleert aria-pressed na een tabklik en heeft dus de gezette
   // attributen en de geregistreerde handlers nodig.
-  attrs: {}, setAttribute(k, v) { this.attrs[k] = v; },
+  // removeAttribute bestaat ook: de aria-busy-throttle van setStatus (fix 6)
+  // zet het attribuut en haalt het na de debounce weer weg; de a11y-check
+  // in sectie 34 leest beide stappen via attrs mee.
+  attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; },
   listeners: {}, addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
   querySelector: () => stubEl(),
   // querySelectorAll bestaat ook: de raster-route leest de kopposities
@@ -185,7 +203,7 @@ vm.runInContext(
   " geschiedenisOptieTekst, generate, mdToHtml," +
   " epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels, loadKev," +
   " pdfRegels, pdfRoute, pdfKoptekst, exportPdfJsPdf, captureFields," +
-  " stroomRegelTekst, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten," +
+  " stroomRegelTekst, stroomWaarschuwing, toonStroomStatus, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten, setStatus," +
   " setKevMap: (m) => { kevMap = m; }," +
   // Testhaken om de afkoelperiodes na een uitval (punt 4) kunstmatig te
   // laten verlopen: de tijdstempels op 0 zetten doet de cooldown als
@@ -208,7 +226,7 @@ const {
   geschiedenisOptieTekst, generate, mdToHtml,
   epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels, loadKev,
   pdfRegels, pdfRoute, pdfKoptekst, exportPdfJsPdf, captureFields,
-  stroomRegelTekst, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten,
+  stroomRegelTekst, stroomWaarschuwing, toonStroomStatus, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten, setStatus,
   setKevMap, kevKoelUit, epssKoelUit, kevState, resetKevState, setAdvisories, getAdvisories, setLastMarkdown,
 } = sandbox.__api;
 
@@ -526,10 +544,13 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
   // CVE-2026-77 staat in de cache (sectie 12); de vijf andere niet.
   const zes = ["CVE-2026-77", "CVE-2026-81", "CVE-2026-82", "CVE-2026-83", "CVE-2026-84", "CVE-2026-85"];
   const metCache = netIndexen(zes, true);
-  check("cache: cachede CVE krijgt geen vertraging-index",
-    [metCache.idx.has("CVE-2026-77"), metCache.count], [false, 5]);
-  check("cache: netwerk-CVE's krijgen oplopende index (0, 1, ...)",
-    [metCache.idx.get("CVE-2026-81"), metCache.idx.get("CVE-2026-85")], [0, 4]);
+  check("cache: cachede CVE valt buiten de netwerkset",
+    [metCache.net.has("CVE-2026-77"), metCache.count], [false, 5]);
+  // Sinds de bundeling is netIndexen een Set (volgorde van eerste verschijning,
+  // geen indexwaarden meer); de netwerkcalls blijven wel in volgorde en de
+  // cachede hit ontbreekt.
+  check("cache: alleen netwerk-CVE's, in volgorde van eerste verschijning",
+    [...metCache.net], ["CVE-2026-81", "CVE-2026-82", "CVE-2026-83", "CVE-2026-84", "CVE-2026-85"]);
   // De stapgrootte schaalt mee met het aantal NETWERKophaalacties: één van
   // de zes is cached, dus nog vijf netwerkcalls en géén opschaling naar 6,5 s
   // (oud gedrag: zes CVE's in totaal zou wél opschalen).
@@ -720,7 +741,12 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     cachedStub("#pdf-btn").disabled = false;
     cachedStub("#pdf-opmaak").disabled = false;
     statusWrites.length = 0;
+    // Verwachte console-waarschuwing van de mislukte bundelcall (verbeterpunt 4):
+    // vm-console tijdelijk afzetten, zoals bij de andere afgedwongen foutpaden.
+    const origConsole14b = sandbox.console;
+    sandbox.console = { log: noop, warn: noop, error: noop };
     await generate();
+    sandbox.console = origConsole14b;
     check("volledige mislukking: melding 'Ophalen mislukt voor'",
       statusWrites[statusWrites.length - 1].startsWith("Ophalen mislukt voor: CVE-2026-4001"), true);
     check("volledige mislukking: alle vijf de knoppen zijn weer bedienbaar",
@@ -1125,8 +1151,11 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
   check("stroomschema: volledige notatie blijft onveranderd",
     buildMarkdown().includes("![Proces](https://x.nl/p.png)"), true);
   const imgHtml = mdToHtml("![Stroomschema](https://x.nl/a.png)");
-  check("stroomschema: preview toont <img> met alt en geen los uitroepteken",
-    [imgHtml.includes('<img src="https://x.nl/a.png" alt="Stroomschema">'), imgHtml.includes("!<a")],
+  // Fix 6: de renderer geeft afbeeldingen loading="lazy" en
+  // referrerpolicy="no-referrer" mee (check op de volledige tag).
+  check("stroomschema: preview toont <img> met alt, lazy-load en referrerpolicy, geen los uitroepteken",
+    [imgHtml.includes('<img src="https://x.nl/a.png" alt="Stroomschema" loading="lazy" referrerpolicy="no-referrer">'),
+     imgHtml.includes("!<a")],
     [true, false]);
   check("stroomschema: markdown-koppeling blijft een ankertekst (regressie)",
     mdToHtml("[klik](https://x.nl/a)").includes('<a href="https://x.nl/a" target="_blank" rel="noopener">klik</a>'), true);
@@ -1595,9 +1624,19 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     };
     clearCveCache();
     cachedStub("#cve-input").value = "CVE-2026-5001, CVE-2026-5002";
+    // Verbeterpunt 4: de mislukte bundelcall logt nu één console-waarschuwing
+    // (voorheen spoorloos). Opvangen in plaats van wegzwijgen: de warn is
+    // hier de testverwachting, de vm-console gaat zolang op stils.
+    const origConsole30 = sandbox.console;
+    const warns30 = [];
+    sandbox.console = { log: noop, warn: (...a) => warns30.push(a.join(" ")), error: noop };
     await generate();
+    sandbox.console = origConsole30;
     check("bundeling: mislukte bundelcall (503) valt terug op route-per-nummer",
       [nvd30c, getAdvisories().length, getAdvisories().every((c) => !c._fetchFailed)], [5, 2, true]);
+    check("bundeling: de mislukte bundelcall logt één waarschuwing met app-prefix",
+      [warns30.length, warns30[0].startsWith("Advisory Writer: gebundelde NVD-call mislukt"), warns30[0].includes("503")],
+      [1, true, true]);
 
     // (e) het chunkplafond staat als constante in de bron: 20 nummers per
     //     verzoek, ruim binnen de 100 die de API toestaat en binnen de
@@ -1777,6 +1816,251 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
       JSON.stringify(historyRead()[0].advisories), JSON.stringify(historyRead()[1].advisories));
     setAdvisories([]);
     setLastMarkdown("");
+  }
+
+  // --- 34. Nitjes-ronde (punt 6): gedeelde escape, veldgeheugen-cache, a11y ----
+  // Vier kleine afwerkingen, elk vastgezet: (a) mdToHtml kent geen eigen
+  // escape-variant meer maar gebruikt escHtml (de enige HTML-escape van de
+  // app), (b) het veldgeheugen houdt een in-memory kopie zodat typen niet
+  // per toetsaanslag de hele JSON herleest en -parse, (c) de aria-live-
+  // statusbalk krijgt tijdens meldingsbursts tijdelijk aria-busy (fix 6),
+  // zodat een schermlezer alleen de definitieve melding voorleest, en
+  // (d) de lazy stroomschema-<img> wordt in sectie 24 op de volledige tag
+  // gecheckt.
+  {
+    // (a) gedeelde escape: escHtml escaped dubbele quotes, de oude interne
+    // esc van mdToHtml niet - als de output &quot; bevat, draait escHtml.
+    check("escape: mdToHtml escapeert via de gedeelde escHtml (ook \" )",
+      [mdToHtml('hij "zij"').includes("&quot;"), mdToHtml("hij &amp; zij").includes("&amp;")],
+      [true, true]);
+    check("escape: mdToHtml leunt op escHtml en heeft geen eigen escape-variant meer",
+      [/const esc = escHtml;/.test(src), !/const esc = \(s\) =>/.test(src)], [true, true]);
+
+    // (b) veldgeheugen: de input-handler van initFieldMemory schrijft via
+    // de in-memory kop, maar write-through blijft: de JSON in localStorage
+    // is na élke wijziging actueel.
+    cachedStub("#meldpunt").value = "CERT-Meldpunt";
+    cachedStub("#meldpunt").listeners.input[0]();
+    check("veldgeheugen: typen schrijft via de in-memory kop direct door naar localStorage",
+      JSON.parse(sandbox.localStorage.getItem("advisory-writer:velden-v1")).meldpunt,
+      "CERT-Meldpunt");
+    check("veldgeheugen: één in-memory exemplaar als bron (cache + write-through)",
+      [/let veldenCache = null;/.test(src), /function veldenLezen/.test(src),
+       /function veldenSchrijven/.test(src)], [true, true, true]);
+
+    // (c) aria-busy-throttle: tijdens een burst is de regio busy (screen-
+    // readers slaan over), na 400 ms meldingsstilte valt de vlag weg en is
+    // de uiteindelijke melding weer voorleesbaar.
+    cachedStub("#status").removeAttribute("aria-busy");
+    setStatus("tussenmelding");
+    check("a11y: setStatus markeert de live-region busy tijdens een meldingsburst",
+      cachedStub("#status").attrs["aria-busy"], "true");
+    await new Promise((r) => setTimeout(r, 600)); // de debounce van 400 ms verloopt
+    check("a11y: na meldingsstilte verdwijnt aria-busy en staat de definitieve melding",
+      [cachedStub("#status").attrs["aria-busy"], cachedStub("#status").textContent],
+      [undefined, "tussenmelding"]);
+  }
+
+  // ---------- 35. Plaatjeswacht vóór de raster-PDF (kopposities na definitieve layout) ----------
+  // De fix: een stroomschemabeeld in de verborgen kopie laadt daar off-
+  // screen vaak niet vanzelf en heeft tijdens het laden hoogte 0. html2-
+  // canvas tekent het beeld wél (eigen imagelader), maar de kopposities
+  // werden vóór de fix gemeten terwijl het beeld nog geen hoogte had — de
+  // repen sneden dan op de verkeerde plekken. Nu: eager zetten en wachten
+  // met dezelfde helper als de printdialoog, vóór het tekenen én meten.
+  {
+    const oorspronkelijkeCreate = sandbox.document.createElement;
+    let kopie = null;
+    let nepImgs = [];
+    let nepKoppen = [];
+    // De kopie-stub krijgt twee gescheiden querySelectorAll-vragen: de
+    // plaatjeszoek (lijst met namaak-img's) en de kopmeting (offsetTop-
+    // objecten zónder addEventListener, zoals de helper al filtreert).
+    sandbox.document.createElement = (tag) => {
+      const el = oorspronkelijkeCreate(tag);
+      if (tag === "div") {
+        el.appendChild = function (c) { this.children.push(c); kopie = c; c.querySelectorAll = (s) => (s === "img" ? nepImgs : nepKoppen); };
+        el.remove = () => { el.removed = true; };
+      }
+      return el;
+    };
+    const downloads35 = [];
+    class FakeJsPdf35 {
+      constructor() { this.page = 1; }
+      addPage() { this.page += 1; }
+      getNumberOfPages() { return this.page; }
+      setPage() { } setFont() { } setFontSize() { } setTextColor() { }
+      addImage() { this.beeld = (this.beeld || 0) + 1; }
+      text() { } save(naam) { downloads35.push(naam); }
+    }
+    const img35 = {
+      complete: false, loading: "lazy", listeners: {},
+      addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
+    };
+    nepImgs = [img35];
+    nepKoppen = [{ offsetTop: 100 }];
+    let eagerBijTeken = null;
+    sandbox.window = {
+      jspdf: { jsPDF: FakeJsPdf35 },
+      html2canvas: async () => { eagerBijTeken = img35.loading; return { width: 1316, height: 1000 }; },
+    };
+    setLastMarkdown("# Kop\n\ntekst\n");
+    cachedStub("#advisory-preview").innerHTML = '<p><img src="https://x.nl/p.png" alt="Stroom" loading="lazy"></p>';
+    cachedStub("#advisory-ref").value = "PLAATJE-1";
+    const wachten35 = exportPdfMetOpmaak();
+    await new Promise((r) => setTimeout(r, 20));
+    check("raster: ladend beeld wordt eager gezet en de export wacht (nog geen download)",
+      [img35.loading, (img35.listeners.load || []).length, img35.complete, downloads35.length],
+      ["eager", 1, false, 0]);
+    img35.complete = true;
+    (img35.listeners.load || []).forEach((fn) => fn()); // beeld is afgewerkt
+    await wachten35;
+    check("raster: na de wacht wordt getekend (beeld was eager) en gedownload",
+      [eagerBijTeken, downloads35], ["eager", ["PLAATJE-1-opmaak.pdf"]]);
+    check("helper: gedeelde wachtOpPlaatjes met cap van 3 s, printdialoog én raster gebruiken hem",
+      [/function wachtOpPlaatjes\(wortel, capMs = 3000\)/.test(src),
+       /wachtOpPlaatjes\(doc\)/.test(src), /await wachtOpPlaatjes\(binnen\)/.test(src)],
+      [true, true, true]);
+    sandbox.document.createElement = oorspronkelijkeCreate;
+  }
+
+  // ---------- 36. Parallel KEV + EPSS na de CVE-fase (verbeterpunt 2) ----------
+  {
+    // Voorheen liepen loadKev en laadEpss na elkaar: de wachttijd van de
+    // trage KEV-feed (meerdere MB) telde op bij die van EPSS. Bewijs van de
+    // paralleliteit is de startvolgorde: de EPSS-call moet al gelanceerd
+    // zijn terwijl de (bewust trage) KEV-feed nog loopt. Deterministisch:
+    // beide fetches starten in dezelfde synchrone tick, dus de volgorde is
+    // geen race maar een feitelijke gebeurtenissenlijst.
+    const origFetch36 = sandbox.fetch;
+    const gebeurtenissen = [];
+    resetKevState();
+    clearEpssCache();
+    clearCveCache();
+    sandbox.sessionStorage.clear();
+    sandbox.fetch = async (url) => {
+      if (url.includes("services.nvd")) {
+        return { ok: true, json: async () => ({ vulnerabilities: [{ cve: { id: "CVE-2026-3601", descriptions: [{ lang: "en", value: "d" }] } }] }) };
+      }
+      if (url.includes("cisa.gov")) {
+        gebeurtenissen.push("kev-start");
+        await new Promise((r) => setTimeout(r, 60)); // de trage feed
+        gebeurtenissen.push("kev-klaar");
+        return { ok: true, json: async () => ({ vulnerabilities: [] }) };
+      }
+      if (url.includes("api.first.org")) {
+        gebeurtenissen.push("epss-start");
+        return { ok: true, json: async () => ({ data: [{ cve: "CVE-2026-3601", epss: 0.2, percentile: 0.9, date: "2026-11-25" }] }) };
+      }
+      return { ok: true, text: async () => "", json: async () => ({}) };
+    };
+    cachedStub("#cve-input").value = "CVE-2026-3601";
+    await generate();
+    check("parallel: EPSS-start vóór KEV-klaar (loaders lopen gelijktijdig)",
+      [gebeurtenissen.indexOf("kev-start") >= 0, gebeurtenissen.indexOf("epss-start") < gebeurtenissen.indexOf("kev-klaar")],
+      [true, true]);
+    check("parallel: beide resultaten komen alsnog volledig in de advisory",
+      [getAdvisories().map((c) => c.id), kevState(), epssInfo({ id: "CVE-2026-3601" }).score],
+      [["CVE-2026-3601"], { map: 0, failed: false }, 0.2]);
+    check("bron: géén sequentiële await-loadKev meer vóór de EPSS-fase",
+      [/await Promise\.all\(achtergrond\);/.test(src), !/await loadKev\(\);\s*\/\/ EPSS/.test(src)],
+      [true, true]);
+    sandbox.fetch = origFetch36;
+  }
+
+  // ---------- 37. Zichtbare stroomschema-weigering (evaluatieronde punt 5) ----------
+  // Een geweigerd URL-schema liet de beeldregel woordloos vallen. Nu meldt
+  // de statusbalk de weigering: helper stroomWaarschuwing (puur, direct
+  // testbaar) plus toonmomenten in refreshOutput en de afsluitende
+  // generatiemelding. De herstelbevestiging klinkt precies één keer.
+  {
+    // (a) helper: leeg veld en toegestane schema's melden niets
+    const stroomTest37 = (v) => { cachedStub("#stroomschema").value = v; return stroomWaarschuwing(); };
+    check("stroomschema-weigering: leeg veld en toegestane schema's leveren niets op",
+      [stroomTest37(""), stroomTest37("https://x.nl/a.png"), stroomTest37("/img/p.png"), stroomTest37("data:image/png;base64,AAAA")],
+      [null, null, null, null]);
+    // (b) helper: geweigerd schema noemt schema én URL
+    const wBlob = stroomTest37("blob:https://intranet/x.png");
+    check("stroomschema-weigering: geweigerd schema noemt schema en URL",
+      [wBlob.startsWith("Stroomschema-URL geweigerd (blob:)"), wBlob.includes("blob:https://intranet/x.png")],
+      [true, true]);
+    // (c) volledige notatie: het binnenschema wordt gemeld, beeldregel valt
+    // (let op: geen haakjes in het testschema — [^)]* in de blokregex loopt
+    // daar anders over heen en telt de invoer als kale tekst)
+    const wJs = stroomTest37("![Proces](javascript:alert)");
+    check("stroomschema-weigering: volledige notatie meldt het binnenschema",
+      [wJs.startsWith("Stroomschema-URL geweigerd (javascript:)"), stroomRegelTekst()],
+      [true, ""]);
+
+    // (d) statusbalk: toonStroomStatus toont de actieve weigering en na
+    // herstel één keer een bevestiging, daarna volgt er geen meer
+    stroomTest37("ftp://x.nl/a.png");
+    statusWrites.length = 0;
+    toonStroomStatus();
+    check("stroomschema-weigering: de actieve weigering verschijnt in de statusbalk",
+      statusWrites[statusWrites.length - 1].includes("Stroomschema-URL geweigerd (ftp:)"), true);
+    stroomTest37("https://x.nl/a.png");
+    toonStroomStatus();
+    toonStroomStatus(); // tweede keer: geen herhaling van de bevestiging
+    check("stroomschema-weigering: herstel bevestigt precies één keer, daarna stil",
+      statusWrites.filter((w) => w.includes("weer geaccepteerd")).length, 1);
+
+    // (e) dynamisch: een generatiebeurt met een geweigerd veld sluit af met
+    // de weigering achter de Klaar-melding (die is het stuk dat blijft staan)
+    const origFetch37 = sandbox.fetch;
+    clearCveCache();
+    sandbox.fetch = async (url) => {
+      if (url.includes("services.nvd")) {
+        return { ok: true, json: async () => ({ vulnerabilities: [{ cve: { id: "CVE-2026-3701", descriptions: [{ lang: "en", value: "d" }] } }] }) };
+      }
+      return { ok: true, text: async () => "", json: async () => ({}) };
+    };
+    stroomTest37("blob:https://intranet/plaatje.png");
+    cachedStub("#cve-input").value = "CVE-2026-3701";
+    statusWrites.length = 0;
+    await generate();
+    check("stroomschema-weigering: afsluitende generatiemelding bevat de weigering",
+      [statusWrites[statusWrites.length - 1].startsWith("Klaar."),
+       statusWrites[statusWrites.length - 1].includes("Stroomschema-URL geweigerd (blob:) —")],
+      [true, true]);
+    sandbox.fetch = origFetch37;
+
+    // (f) bedrading: beide toonmomenten staan in de bron geworteld
+    check("stroomschema-weigering: refreshOutput en de afsluitende melding zijn bedraad",
+      [/toonStroomStatus\(\);/.test(src), /const stroomDeel = stroomWaarschuwing\(\);/.test(src)],
+      [true, true]);
+    cachedStub("#stroomschema").value = ""; // stub-hygiëne
+  }
+
+  // ---------- 38. Deellink-basis op file:// (evaluatieronde punt 6) ----------
+  // location.origin is op een bestand-URL het letterlijke "null", waardoor
+  // elke gedeelde link met "null/" begon. De handler bouwt de basis nu uit
+  // het eigen adres (zonder oude query/hash) als er geen echte origin is;
+  // op http(s) blijft origin+pathname byte-voor-byte zoals voorheen.
+  {
+    const origLoc38 = sandbox.location;
+    const origNav38 = sandbox.navigator;
+    const opgehaald38 = [];
+    sandbox.navigator = { clipboard: { writeText: async (t) => { opgehaald38.push(t); } } };
+    cachedStub("#cve-input").value = "CVE-2026-3801";
+    // (a) http(s): vertrouwde origin+pathname-vorm, exact als voorheen
+    sandbox.location = { origin: "http://localhost:8080", pathname: "/index.html", href: "http://localhost:8080/index.html?x=1" };
+    await cachedStub("#share-btn").listeners.click[0]();
+    check("deellink: http-origin blijft origin+pathname als basis, cve erachter gezet",
+      opgehaald38[0], "http://localhost:8080/index.html?cve=CVE-2026-3801");
+    // (b) file://: origin is het letterlijke "null" — geen null-voorvoegsel
+    // meer en de oude query en hash van het eigen adres vallen weg
+    sandbox.location = { origin: "null", pathname: "/", href: "file:///home/p/index.html?cve=CVE-2026-1111#top" };
+    statusWrites.length = 0;
+    await cachedStub("#share-btn").listeners.click[0]();
+    check("deellink: file-null-origineel wordt een bruikbaar eigen adres zonder oude query",
+      [opgehaald38[1], statusWrites[statusWrites.length - 1]],
+      ["file:///home/p/index.html?cve=CVE-2026-3801", "Deellink gekopieerd: file:///home/p/index.html?cve=CVE-2026-3801"]);
+    // (c) bedrading: de null-origineel-tak staat in de bron
+    check("bron: deellink valt bij een null-origin terug op het eigen adres",
+      /location\.origin === "null"[\s\S]{0,200}location\.href\.split\(/.test(src), true);
+    sandbox.location = origLoc38;
+    sandbox.navigator = origNav38;
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

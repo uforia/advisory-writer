@@ -9,11 +9,15 @@
        (optionele API-sleutel verhoogt de limiet; retry/backoff ingebouwd;
        per beurt gebundeld opgehaald via parameter cveIds, max 20 nummers
        per chunk, met terugval per nummer voor wat de bundelrespons niet
-       teruggeeft of als de hele bundelcall faalt)
+       teruggeeft of als de hele bundelcall faalt; een mislukte bundelcall
+       logt een console-waarschuwing met het app-prefix)
      - CVE Program API (fallback): https://cveawg.mitre.org/api/cve/...
    KEV/SSVC (actief misbruik) komt primair uit de NVD-respons zelf
    (velden cisaExploitAdd/cisaActionDue en metrics.ssvcV*); de KEV-feed is
-   terugval en wordt alleen opgehaald als die velden ontbreken:
+   terugval en wordt alleen opgehaald als die velden ontbreken. De
+   KEV-terugval en de EPSS-call lopen parallel (Promise.all na de
+   CVE-fase): de traagste van de twee bepaalt de duur van de fase, niet
+   de som van beide:
    https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
    EPSS (exploitkans) komt van de FIRST EPSS-API
    (https://api.first.org/data/v1/epss?cve=...): één gebundeld verzoek per
@@ -25,16 +29,22 @@
    zie distributeurRegels().
    Stroomschema: een optionele afbeelding-URL (bijv. een eigen beslisboom of
    procesplaatje) kan als beeld onder de Handelingsperspectieven & Adviezen
-   worden gezet; zie stroomRegelTekst().
+   worden gezet; zie stroomRegelTekst(). Een geweigerd URL-schema laat de
+   beeldregel niet meer woordloos vallen: de statusbalk meldt de weigering
+   (helper stroomWaarschuwing, toonmoment toonStroomStatus) bij live-herbouw
+   én in de afsluitende melding van genereren.
    PDF-export: jsPDF (CDN) maakt een echte PDF-download met paginanummers en
    lopende kop; zonder die bibliotheek (offline of geblokkeerd) of met het
    vink "PDF via printdialoog" blijft de browserprintdialoog de route. De
    knop "PDF met opmaak" fotografeert de preview met html2canvas (CDN) en
    plakt die als raster op een PDF; ontbreekt die bibliotheek of faalt het
-   tekenen, dan valt ook die knop terug op de printdialoog. Beide CDN-
-   scripts laden async en zijn SRI-gepind.
+   tekenen, dan valt ook die knop terug op de printdialoog. Beide PDF-routes
+   wachten eerst op ladende afbeeldingen (gedeelde wachtOpPlaatjes-helper),
+   zodat de raster-route zijn kopposities op de juiste hoogtes meet. Beide
+   CDN-scripts laden async en zijn SRI-gepind.
    Extra bediening: live-herbouw van de advisory bij veldwijzigingen,
-   staatsherstel na herladen (LocalStorage), deellink via ?cve=...-parameter,
+   staatsherstel na herladen (LocalStorage), deellink via ?cve=...-parameter
+   (op file:// valt die terug op het eigen adres, want daar is origin "null"),
    CVE-fetchcache (sessionStorage), bewerkbare raw-markdown en een
    geschiedenis van de laatste advisory's, waarin elke regel een eigen naam
    kan krijgen via het labelveld naast de dropdown; de CVE-records gaan
@@ -46,9 +56,11 @@
    knoppen uit en de finally zet ze voor élke uitkomst weer aan (succes,
    onverwachte fout en vroegtijdige return bij volledige ophaalmislukking).
    Toegankelijkheid (A11y): de statusbalk is een aria-live-region (meldingen
-   als "NVD-limiet bereikt" zijn zo ook voor schermlezers hoorbaar), de
-   tab-knoppen zijn toggle-knoppen met aria-pressed, het API-sleutelveld is
-   type="password" en de bewerkbare tekstvakken hebben een label.
+   als "NVD-limiet bereikt" zijn zo ook voor schermlezers hoorbaar) en
+   krijgt tijdens meldingsbursts tijdelijk aria-busy, zodat een schermlezer
+   alleen de definitieve melding voorleest; de tab-knoppen zijn
+   toggle-knoppen met aria-pressed, het API-sleutelveld is type="password"
+   en de bewerkbare tekstvakken hebben een label.
    ============================================================ */
 
 "use strict";
@@ -114,23 +126,32 @@ const MEMORIZED_FIELDS = [
 ];
 const DETAILS_KEY = "__optiesOpen";
 
-function storageGet() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
-  catch { return {}; } // privémodus/blokkeercookie: werken zonder onthouden
+// In-memory kopie van het veldgeheugen (fix 6): saveField deed voorheen per
+// toetsaanslag een volledige lees-parseer-voeg-schrijf-cyclus. De cache houdt
+// de data in het geheugen; per wijziging is alleen nog een setItem nodig en
+// de JSON wordt één keer per paginalaad geparseerd. Write-through blijft:
+// élke wijziging belandt nog direct in localStorage, de cache pakt alleen
+// het herhaaldelijk herlezen en -parsen weg.
+let veldenCache = null;
+function veldenLezen() {
+  if (veldenCache) return veldenCache;
+  try { veldenCache = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+  catch { veldenCache = {}; } // privémodus/blokkeercookie: werken zonder onthouden
+  return veldenCache;
 }
 
-function storageSet(data) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch { /* geen persistentie */ }
+function veldenSchrijven() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(veldenLezen())); } catch { /* geen persistentie */ }
 }
 
 function saveField(el) {
-  const data = storageGet();
+  const data = veldenLezen();
   data[el.id] = el.type === "checkbox" ? el.checked : el.value; // checkbox: .checked, niet .value ("on")
-  storageSet(data);
+  veldenSchrijven();
 }
 
 function restoreFields() {
-  const data = storageGet();
+  const data = veldenLezen();
   for (const id of MEMORIZED_FIELDS) {
     const el = document.getElementById(id);
     if (!el || !Object.prototype.hasOwnProperty.call(data, id)) continue;
@@ -152,9 +173,8 @@ function initFieldMemory() {
   const detailsEl = document.querySelector("details.options");
   if (detailsEl) {
     detailsEl.addEventListener("toggle", () => {
-      const data = storageGet();
-      data[DETAILS_KEY] = detailsEl.open;
-      storageSet(data);
+      veldenLezen()[DETAILS_KEY] = detailsEl.open;
+      veldenSchrijven();
     });
   }
   const resetBtn = $("#reset-btn");
@@ -162,6 +182,7 @@ function initFieldMemory() {
     resetBtn.addEventListener("click", () => {
       if (!confirm("Alle ingevulde velden wissen en terugkeren naar de standaardwaarden?")) return;
       try { localStorage.removeItem(STORAGE_KEY); } catch { /* leeg al */ }
+      veldenCache = null; // de in-memory kop moet meewissen (fix 6)
       clearCveCache(); // ook de CVE-fetchcache leeg: wissen = écht opnieuw
       clearEpssCache(); // idem voor de EPSS-cache
       location.reload();
@@ -451,9 +472,20 @@ function epssRegelTekst(cve) {
 
 // ---------- Helpers ----------
 
+// De statusbalk is een aria-live-region (zie index.html): schermlezers
+// lezen wijzigingen voor. Tijdens genereren komen meldingen in bursts
+// (start, één per voltooid CVE, afloop) - onthinderd zou een schermlezer
+// élke melding volledig voorlezen. Tijdens de burst wordt de regio daarom
+// als busy gemarkeerd (aria-busy); schermlezers slaan updates dan over en
+// na 400 ms meldingsstilte valt de vlag weg, zodat de definitieve melding
+// wéér wordt voorgelezen (fix 6).
+let statusBusyTimer = null;
 function setStatus(msg, isError = false) {
   statusEl.textContent = msg;
   statusEl.style.color = isError ? "#f87171" : "";
+  statusEl.setAttribute("aria-busy", "true");
+  clearTimeout(statusBusyTimer);
+  statusBusyTimer = setTimeout(() => statusEl.removeAttribute("aria-busy"), 400);
 }
 
 // Maak een token uit het CVE-veld gelijkvormig: leestekens aan de rand af-
@@ -531,6 +563,10 @@ function mapSeverity(sev) {
   return SEVERITY_MAP[(sev || "").toUpperCase()] || { prioriteit: "Onbekend", badge: "unknown" };
 }
 
+// De enige HTML-escape van de app (fix 6): ook mdToHtml gebruikt deze
+// helper (via esc), zodat er geen tweede, lichtere variant meer is die
+// stilzwijgend kan afwijken. De extra " ten opzichte van de oude interne
+// esc van mdToHtml is daar winst: de preview-renderer zet tekst in HTML.
 const escHtml = (s) => String(s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -946,20 +982,18 @@ function clearCveCache() {
   try { sessionStorage.removeItem(CVE_CACHE_KEY); } catch { /* al leeg */ }
 }
 
-// Verdeling van de rate-limit-vertraging: alleen CVE's die niét uit de cache
-// komen krijgen een vertraging-index (0, 1, 2, ...); cachede hits vallen
-// buiten de map en starten direct. Het veld 'count' is het aantal
-// netwerkophaalacties en bepaalt de stapgrootte (zie nvdStapMs).
+// Welke CVE's de facto het netwerk opgaan: cachede hits vallen buiten de
+// set en komen direct uit fetchCve terug. Het veld 'count' is het aantal
+// netwerkophaalacties en bepaalt de stapgrootte (zie nvdStapMs). Tot vóór
+// de bundeling waren de waarden tevens vertraging-indexen (0, 1, 2, ...);
+// sinds de chunkvertraging de chunkindex gebruikt, is die index een
+// overblijfsel en is een Set toereikend (verbeterpunt 3).
 function netIndexen(ids, useCache) {
-  const idx = new Map();
-  let n = 0;
+  const net = new Set();
   for (const id of ids) {
-    if (!(useCache && cveCacheGet(id))) {
-      idx.set(id, n);
-      n += 1;
-    }
+    if (!(useCache && cveCacheGet(id))) net.add(id);
   }
-  return { idx, count: n };
+  return { net, count: net.size };
 }
 
 // Harde bovengrens per poging: zonder timeout zou een hangende verbinding
@@ -1158,16 +1192,57 @@ function stroomUrlToegestaan(url) {
   return s === "http:" || s === "https:" || url.toLowerCase().startsWith("data:image/");
 }
 
+// Het URL-deel van het veld: een kaal URL'tje zoals het staat, een volledig
+// ![bijschrift](url)-blok zonder haakjes. De ene plek waar de veldvorm
+// wordt opengeslagen, zodat beeldregel en weigeringsmelding nooit over
+// welk URL'er ze oordelen uit elkaar kunnen lopen.
+function stroomUrlUitVeld() {
+  const rauw = stroomInput.value.trim();
+  if (!rauw) return "";
+  if (/^!\[[^\]]*\]\([^)]*\)$/.test(rauw)) return rauw.slice(rauw.indexOf("(") + 1, -1);
+  return rauw;
+}
+
 function stroomRegelTekst() {
   const rauw = stroomInput.value.trim();
   if (!rauw) return "";
   if (/^!\[[^\]]*\]\([^)]*\)$/.test(rauw)) {
     // complete notatie: het schema van de ópgenomen URL geldt,
     // een afgewezen schema laat de hele regel vallen
-    const binnen = rauw.slice(rauw.indexOf("(") + 1, -1);
-    return stroomUrlToegestaan(binnen) ? rauw : "";
+    return stroomUrlToegestaan(stroomUrlUitVeld()) ? rauw : "";
   }
   return stroomUrlToegestaan(rauw) ? `![Stroomschema](${rauw})` : "";
+}
+
+// Zichtbare weigering (evaluatieronde punt 5): een geweigerd URL-schema liet
+// de beeldregel woordloos vallen, waarna "waar is mijn plaatje?" de enige
+// feedback was. Deze helper is de boodschap: wél invoer, maar géén
+// beeldregel opgeleverd, dan is er geweigerd en noemt de melding het schema
+// en de URL erbij. Leeg veld of toegestaan schema: null, niets te melden.
+function stroomWaarschuwing() {
+  const url = stroomUrlUitVeld();
+  if (!url || stroomUrlToegestaan(url)) return null;
+  const schema = url.match(/^([A-Za-z][A-Za-z0-9+.-]*:)/)[1];
+  return `Stroomschema-URL geweigerd (${schema}) — alleen http(s), relatief of data:image toegestaan: ${url}`;
+}
+
+// De weigering is een toestand, geen eenmalige gebeurtenis: zolang het veld
+// het geweigerde schema houdt, komt de melding bij élke herbouw terug. Op
+// het moment dat het veld is hersteld, klinkt één keer een korte
+// bevestiging — daarna blijft de statusbalk met rust, anders zou élke
+// toetsaanslag in welk veld dan ook er iets op gaat zetten.
+let stroomMeldingActief = false;
+function toonStroomStatus() {
+  const boodschap = stroomWaarschuwing();
+  if (boodschap) {
+    stroomMeldingActief = true;
+    setStatus(boodschap, true);
+    return;
+  }
+  if (!stroomMeldingActief) return;
+  stroomMeldingActief = false;
+  if (stroomInput.value.trim())
+    setStatus("Stroomschema-URL weer geaccepteerd; het beeld staat weer in de advisory.");
 }
 
 // ---------- Markdown generation (advisory template, NS CERT-briefstijl) ----------
@@ -1357,7 +1432,7 @@ ${disclaimerBlock}
 // ---------- Tiny markdown renderer (preview) ----------
 
 function mdToHtml(md) {
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const esc = escHtml; // gedeelde helper (fix 6): geen tweede escape-variant
   const inline = (s) => s
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -1365,7 +1440,12 @@ function mdToHtml(md) {
     // Afbeelding vóór de koppeling: ![alt](url) deelt de syntaxis met
     // [tekst](url). De HTML-escaping (esc draait vóór inline) garandeert
     // dat de src hier geen quotes bevat die uit het src-attribuut breken.
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">')
+    // Afbeeldingen laden lazy (fix 6: geen blokkerende fetch tijdens de
+    // herbouw) en zenden geen referrer naar externe plaatjesservers. De
+    // printdialoog en de raster-PDF werken op dezelfde HTML; beide laden de
+    // plaatjes zelf (print-rendering en html2canvas' eigen imagelader), dus
+    // de lazy-attributen kosten hun niets.
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" loading="lazy" referrerpolicy="no-referrer">')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/&lt;(https?:\/\/[^&\s>]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
     // Autolink. De afsluitende punt, komma of sluitende haak van een zin hoort
@@ -1449,6 +1529,7 @@ function refreshOutput() {
     previewEl.innerHTML = mdToHtml(lastMarkdown);
     rawEl.value = lastMarkdown;
   }
+  toonStroomStatus(); // geweigerd stroomschema-schema meldt zich direct (eval. punt 5)
   saveState();
 }
 
@@ -1846,16 +1927,19 @@ async function generateUitvoeren(ids, genegeerd) {
   // cachede hits worden direct teruggegeven en hoeven niet in de rij te
   // staan. De stapgrootte schaalt daarom mee met het aantal
   // netwerkophaalacties, niet met het totaal (zie nvdStapMs).
-  const { idx: netIdx, count: netCount } = netIndexen(ids, !noCacheInput.checked);
-  const stap = nvdStapMs(netCount, !!apiKeyInput.value.trim());
+  const { net: netIdSet } = netIndexen(ids, !noCacheInput.checked);
+  // Van set naar array: het chunkplafond en de chunkvertraging lopen de
+  // nummers per index af.
+  const netIds = [...netIdSet];
+  const stap = nvdStapMs(netIds.length, !!apiKeyInput.value.trim());
   // Echte voortgang: één startmelding (met de cache-verdeling) en daarna een
   // update per VOLTOOIDE ophaalactie. De meldingen hiervoor stonden vóór de
   // eerste await in de map-callback: die draaiden allemaal synchroon op t=0,
   // zodat alleen het laatste nummer zichtbaar was in plaats van de voortgang.
   let voltooid = 0;
-  const uitCacheVooraf = ids.length - netCount;
+  const uitCacheVooraf = ids.length - netIds.length;
   const meervoud = ids.length === 1 ? "" : "'s";
-  setStatus(`Ophalen van ${ids.length} CVE${meervoud} (${netCount} op te halen${uitCacheVooraf ? `, ${uitCacheVooraf} uit cache` : ""})...`);
+  setStatus(`Ophalen van ${ids.length} CVE${meervoud} (${netIds.length} op te halen${uitCacheVooraf ? `, ${uitCacheVooraf} uit cache` : ""})...`);
   // Gebundeld ophalen: de nummers die het netwerk opgaan, verdwijnen in
   // chunks van NVD_BATCH_MAX in één NVD-verzoek (parameter cveIds) in plaats
   // van één verzoek per nummer. Acht nummers kosten daarmee één verzoek in
@@ -1865,14 +1949,22 @@ async function generateUitvoeren(ids, genegeerd) {
   // niet teruggeeft — bijvoorbeeld een pas gemeld nummer dat NVD nog niet
   // kent — en een compleet mislukte bundelcall, krijgt de oude route-per-CVE
   // inclusief de CVE-Program-backstop; cachede nummers doen niet mee.
-  const netIds = ids.filter((id) => netIdx.has(id));
   const chunks = [];
   for (let i = 0; i < netIds.length; i += NVD_BATCH_MAX) chunks.push(netIds.slice(i, i + NVD_BATCH_MAX));
   const chunkBelofte = chunks.map((chunk, k) => {
     const p = (async () => {
       if (k > 0) await new Promise((r) => setTimeout(r, k * stap));
       return await fetchNvdBatch(chunk);
-    })().catch(() => new Map()); // bundel mislukt: alle nummers vallen terug
+    })().catch((e) => {
+      // Verbeterpunt 4: een mislukte bundelcall valt terug op de route per
+      // nummer, maar liet daarvoor geen spoor na — in het veld was het
+      // onderscheid tussen "NVD kende dit nummer niet" en "de hele bundel
+      // faalde" dan raden. Eén console.warn per chunk, met het app-prefix
+      // uit de andere foutpaden en de reden erbij (de route-per-nummer
+      // meldt zijn uitval zelf al via de statusbalk).
+      console.warn(`Advisory Writer: gebundelde NVD-call mislukt (${e.message}); de nummers van deze chunk worden per stuk opgehaald`);
+      return new Map();
+    });
     return p;
   });
   const chunkVanId = new Map();
@@ -1916,13 +2008,21 @@ async function generateUitvoeren(ids, genegeerd) {
   // geen misbruikinfo (cisaExploitAdd/SSVC) bevat. Pas ná het ophalen te
   // beoordelen, want dan zijn de CVE-gegevens pas bekend. Niet-opgehaalde
   // CVE's (stubs) slaan we over: daarvoor is de feed alsnog ophalen zonde.
-  if (advisories.some((c) => !c._fetchFailed && kevInfo(c) === null)) await loadKev();
-
   // EPSS (exploitkans): één gebundeld verzoek voor alle wél opgehaalde
   // CVE's; de 24-u-cache maakt een tweede beurt netwerkloos (zie de
   // EPSS-sectie). Niet-opgehaalde CVE's (stubs) slaan we over.
+  // De twee loaders lopen parallel (fix, verbeterpunt 2): ze zijn onafhankelijk
+  // (andere API, andere cache, eigen uitvalafhandeling) en voorheen telde
+  // de wachttijd van de trage KEV-feed (meerdere MB) bij die van EPSS op.
+  // Nu is het einde van de fase het langzaamste van de twee verzoeken in
+  // plaats van de som. Beide loaders slikken hun fouten zelf in (Promise.all
+  // kan hier dus niet verwerpen), en renderen/bouwen gebeurt pas ná beide.
+  const nodigKev = advisories.some((c) => !c._fetchFailed && kevInfo(c) === null);
   const epssOpen = advisories.filter((c) => !c._fetchFailed).map((c) => c.id);
-  if (epssOpen.length) await laadEpss(epssOpen);
+  const achtergrond = [];
+  if (nodigKev) achtergrond.push(loadKev());
+  if (epssOpen.length) achtergrond.push(laadEpss(epssOpen));
+  await Promise.all(achtergrond);
 
   renderCveCards();
   dataPanel.classList.remove("hidden");
@@ -1941,9 +2041,13 @@ async function generateUitvoeren(ids, genegeerd) {
     ? `Klaar. ${ok} CVE(s) verwerkt${cacheDeel}, ${failed.length} mislukt (${failed.join(", ")}); advisory voor zover mogelijk gegenereerd.`
     : `Klaar. ${ok} CVE(s) verwerkt${cacheDeel} en advisory gegenereerd.`;
   const epssDeel = epssFailed ? " EPSS niet beschikbaar (api.first.org)." : "";
+  // Evaluatieronde punt 5: de afsluitende melding is bij een generatiebeurt
+  // het tekststuk dat leesbaar achterblijft - refreshOutput erboven toonde
+  // de stroomschema-weigering al direct, maar wordt hier overschreven.
+  const stroomDeel = stroomWaarschuwing();
   setStatus(`${basis}${epssDeel}` + (genegeerd.length
     ? ` Niet als CVE herkend: ${genegeerd.join(", ")}.`
-    : ""));
+    : "") + (stroomDeel ? ` ${stroomDeel}` : ""));
 }
 
 // ---------- Events ----------
@@ -1971,7 +2075,15 @@ copyBtn.addEventListener("click", async () => {
 // pakt die parameter bij het openen op en haalt de gegevens direct op.
 $("#share-btn").addEventListener("click", async () => {
   const ids = parseCveList(cveInput.value);
-  const url = `${location.origin}${location.pathname}?cve=${encodeURIComponent(ids.join(","))}`;
+  // Deellink-basis (evaluatieronde punt 6): op een bestand-URL (file://,
+  // dubbelklikken op index.html) is location.origin het letterlijke "null",
+  // waardoor elke gedeelde link met "null/" begon. In dat geval is het eigen
+  // adres (zonder oude query of hash) de basis; op http(s) blijft het de
+  // vertrouwde origin+pathname-vorm.
+  const basis = !location.origin || location.origin === "null"
+    ? location.href.split(/[?#]/)[0]
+    : `${location.origin}${location.pathname}`;
+  const url = `${basis}?cve=${encodeURIComponent(ids.join(","))}`;
   try {
     await navigator.clipboard.writeText(url);
     setStatus(`Deellink gekopieerd: ${url}`);
@@ -2099,6 +2211,32 @@ function pdfKoptekst() {
   const rauw = (refInput.value.trim() || titleInput.value.trim() || "advisory")
     .replace(/["'\\<>\n\r]/g, "");
   return rauw.length > 90 ? `${rauw.slice(0, 90)}\u2026` : rauw;
+}
+
+// Gedeelde plaatjeswacht (fix 1 raster-route): zowel de printdialoog als de
+// raster-PDF moeten wachten op afbeeldingen voordat ze aan het werk gaan. De
+// printdialoog omdat een onafgemaakt stroomschemabeeld anders als lege vlek
+// wordt afgedrukt; de raster-route omdat daarin de kopposities worden gemeten
+// in een verborgen kopie: zolang een beeld laadt heeft het hoogte 0, dus alle
+// koppen eronder staan te hoog gemeten en worden de repen op de verkeerde
+// plekken afgesneden. Werkt op een document (.images) én op een element
+// (querySelectorAll). De cap (standaard 3 s) voorkomt dat één onbereikbaar
+// plaatje de export eindeloos ophoudt; een onafgemaakt beeld gaat dan zoals
+// voorheen door.
+function wachtOpPlaatjes(wortel, capMs = 3000) {
+  return new Promise((resolve) => {
+    // Een echte <img> heeft altijd addEventListener; de extra check houdt
+    // de helper ook veilig voor nep-elementen zonder (zoals de
+    // koppositie-stubs van de testharness, die dezelfde querySelectorAll
+    // delen met de plaatjeszoek).
+    const imgEls = [...(wortel.images || wortel.querySelectorAll("img"))]
+      .filter((i) => i && !i.complete && typeof i.addEventListener === "function");
+    if (!imgEls.length) return resolve();
+    let nog = imgEls.length;
+    const klaar = () => { if (--nog <= 0) resolve(); };
+    for (const i of imgEls) { i.addEventListener("load", klaar); i.addEventListener("error", klaar); }
+    setTimeout(resolve, capMs);
+  });
 }
 
 // Echte PDF-download via jsPDF (window.jspdf, UMD-build van de CDN): A4 met
@@ -2230,17 +2368,8 @@ function exportPdfPrinten() {
   // print. Het window-load-event wacht in moderne browsers weliswaar op
   // subresources, maar de toewijzing van onload kan ook een about:blank-load
   // vangen waarop nog geen plaatjes in het document zaten — dus worden ze
-  // hier zelf nagelopen. De cap (3 s) voorkomt dat één onbereikbaar plaatje
-  // de printdialoog oneindig ophoudt; een onafgemaakt beeld wordt dan zoals
-  // voorheen afgedrukt.
-  const wachtOpPlaatjes = () => new Promise((resolve) => {
-    const imgEls = [...(doc.images || [])].filter((i) => !i.complete);
-    if (!imgEls.length) return resolve();
-    let nog = imgEls.length;
-    const klaar = () => { if (--nog <= 0) resolve(); };
-    for (const i of imgEls) { i.addEventListener("load", klaar); i.addEventListener("error", klaar); }
-    setTimeout(resolve, 3000);
-  });
+  // hier zelf nagelopen (gedeelde helper met de raster-PDF, zie
+  // wachtOpPlaatjes: één bron, dezelfde cap van 3 s).
   // Eén load-event kan van de about:blank-documentslag komen en één van het
   // geschreven document: print dus maximaal één keer per exportbeurt.
   let afgedrukt = false;
@@ -2259,7 +2388,7 @@ function exportPdfPrinten() {
   };
   // onload VÓÓR het schrijven toewijzen: bij document.write/close kan het
   // load-event al vóór de toewijzing afvuren, waardoor print() nooit draaide.
-  iframe.onload = () => { wachtOpPlaatjes().then(printNu); };
+  iframe.onload = () => { wachtOpPlaatjes(doc).then(printNu); };
   doc.open();
   // Lopende kop op elke printpagina: advisorynummer/titel via een margebox,
   // zodat pagina 2 en verder herleidbaar blijven. Striping (CSS-content-
@@ -2318,6 +2447,15 @@ async function exportPdfMetOpmaak() {
     let canvas;
     let kopPxs = [];
     try {
+      // Eerst wachten op de beelden, dan pas tekenen en meten (fix 1,
+      // raster-route): een lui stroomschemabeeld in de off-screen kopie
+      // laden niet vanzelf en heeft tijdens het laden hoogte 0. html2canvas
+      // zou het beeld wél tekenen (eigen imagelader), maar de offsetTop van
+      // de koppen eronder was te laag gemeten en de repen snijden dan op de
+      // verkeerde plekken. Dus: eager laden forceren en wachten met
+      // dezelfde helper als de printdialoog (incl. diens cap van 3 s).
+      for (const img of binnen.querySelectorAll("img")) img.loading = "eager";
+      await wachtOpPlaatjes(binnen);
       canvas = await window.html2canvas(bron, { scale: schaal, useCORS: true, backgroundColor: "#ffffff" });
       kopPxs = [...binnen.querySelectorAll("h1, h2, h3, h4")].map((el) => el.offsetTop * schaal);
     } finally {
