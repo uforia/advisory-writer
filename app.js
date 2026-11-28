@@ -1,6 +1,6 @@
 /* ============================================================
    Advisory Writer — automates security advisories.
-   Template follows de voorbeeldstructuur (NS CERT-stijl):
+   Template follows de voorbeeldstructuur (CERT-stijl):
      Versie → aanhef → aankondiging → Impact →
      Handelingsperspectieven & Adviezen → Technische Details →
      afsluiting → geadresseerden → Disclaimer
@@ -25,8 +25,9 @@
    Technische Details vallen netjes weg als de API onbereikbaar is of het
    CVE-nummer niet in het model staat.
    Distributeurtrackers: de advisory sluit een vaste set controlelinks per
-   CVE-nummer af (Debian, Ubuntu, Red Hat, SUSE, Fedora en Amazon Linux);
-   zie distributeurRegels().
+   CVE-nummer af (Debian, Ubuntu, Red Hat, SUSE, Fedora, Amazon Linux en
+   Alpine), aangevuld met extra per-CVE-links uit de NVD-referenties van het
+   eigen nummer (Rocky Linux, Arch Linux); zie distributeurRegels().
    Stroomschema: een optionele afbeelding-URL (bijv. een eigen beslisboom of
    procesplaatje) kan als beeld onder de Handelingsperspectieven & Adviezen
    worden gezet; zie stroomRegelTekst(). Een geweigerd URL-schema laat de
@@ -41,15 +42,29 @@
    tekenen, dan valt ook die knop terug op de printdialoog. Beide PDF-routes
    wachten eerst op ladende afbeeldingen (gedeelde wachtOpPlaatjes-helper),
    zodat de raster-route zijn kopposities op de juiste hoogtes meet. Beide
-   CDN-scripts laden async en zijn SRI-gepind.
+   CDN-scripts laden async en zijn SRI-gepind. De printdialoog zelf krijgt
+   een upgrade via paged.js (optie 3): de pagedjs-polyfill (jsDelivr,
+   sha256-SRI) wordt in het print-iframe geladen en paginéért het document
+   echt (margeboxen in elke browser, breukbescherming op regelgeometrie);
+   is de CDN er niet of te traag, dan print de dialoog kaal zoals altijd.
    Extra bediening: live-herbouw van de advisory bij veldwijzigingen,
    staatsherstel na herladen (LocalStorage), deellink via ?cve=...-parameter
    (op file:// valt die terug op het eigen adres, want daar is origin "null"),
+   de taal van de CVE-beschrijvingen is kiesbaar via het veld "Beschrij-
+   vingstaal" (auto volgt de browsertaal, NL/EN vast; alleen de opgehaalde
+   beschrijving volgt de keuze; zie taalVoorkeur()/kiesBeschrijving()) en
+   de bediening is volledig tweetalig via het veld "Interfacetaal"
+   (woordenboek UI_TEKSTEN met T()/vertaalUi(); de advisory-brief blijft
+   Nederlands; zie uiTaal()),
    CVE-fetchcache (sessionStorage), bewerkbare raw-markdown en een
    geschiedenis van de laatste advisory's, waarin elke regel een eigen naam
    kan krijgen via het labelveld naast de dropdown; de CVE-records gaan
    compact de opslag in (compactAdvisory: alleen wat bouwer en kaart nodig
-   hebben, referenties gekapt op de getoonde zes). De KEV-/EPSS-verzoeken
+   hebben, referenties gekapt op de getoonde zes). Na een beurt met een
+   zachte uitval (mislukte nummers, KEV/EPSS-uitval of een geweigerd
+   stroomschema) verschijnt bovendien de knop "Probeer opnieuw" onder de
+   statusbalk: één klik draait een volledige generatie en heft de
+   KEV/EPSS-afkoelperiode op (optie 7). De KEV-/EPSS-verzoeken
    die bij een herstel op de achtergrond lopen, zijn afbreekbaar: een nieuwe
    generatie kapt ze af in plaats van er dubbel op na te bouwen. Het
    knopslot tijdens genereren is gecentraliseerd: generate() schakelt vijf
@@ -61,6 +76,14 @@
    alleen de definitieve melding voorleest; de tab-knoppen zijn
    toggle-knoppen met aria-pressed, het API-sleutelveld is type="password"
    en de bewerkbare tekstvakken hebben een label.
+   Meertaligheid (optie 2, volledig): twee onafhankelijke keuzes. Het veld
+   "Beschrijvingstaal" (#taal-select) bepaalt uit welke NVD-exemplaren de
+   CVE-beschrijvingen worden gekozen (taalVoorkeur/kiesBeschrijving). Het
+   veld "Interfacetaal" (#ui-taal) vertaalt de bediening: statieveel via
+   data-i18n-attributen (vertaalUi), statusmeldingen, kaart- en
+   geschiedenisteksten via woordenboek UI_TEKSTEN met T(); "auto" volgt de
+   browsertaal en zonder browsertaal blijft de app Nederlands. De advisory-
+   brief zelf blijft Nederlands: de brief is product, niet bediening.
    ============================================================ */
 
 "use strict";
@@ -72,6 +95,10 @@ const titleInput = $("#advisory-title");
 const refInput = $("#advisory-ref");
 const dateInput = $("#pub-date");
 const prioriteitSelect = $("#prioriteit-select");
+// Taalkeuze voor de CVE-beschrijvingen (optie 2); zie taalVoorkeur().
+const taalSelect = $("#taal-select");
+// Taalkeuze van de interface (optie 2, volledig); zie uiTaal()/vertaalUi().
+const uiTaalSelect = $("#ui-taal");
 const aankondigerInput = $("#aankondiger");
 const aankondigingDatumInput = $("#aankondiging-datum");
 const bijnaamInput = $("#bijnaam");
@@ -103,6 +130,9 @@ const historySelect = $("#history-select");
 const histLabelInput = $("#hist-label");
 const histDelBtn = $("#hist-del");
 const histClearBtn = $("#hist-clear");
+// Retry-knop na uitval (optie 7): staat in index.html verborgen en verschijnt
+// alleen na een generatiebeurt met ten minste één zachte uitval.
+const retryBtn = $("#retry-btn");
 
 let advisories = [];   // fetched + normalised CVE data
 let lastMarkdown = "";
@@ -117,9 +147,366 @@ let achtergrondRun = null;
 // nooit heeft aangeraakt, krijgen bij het openen hun automatische standaard
 // (publicatiedatum = nu, voorbeeld-CVE). 'Velden wissen' wist het geheugen.
 
+// ==================== MEERTALIGE UI (OPTIE 2, VOLLEDIG) ====================
+// Twee talen, één woordenboek per taal. uiTaal() volgt hetzelfde patroon als
+// taalVoorkeur(): vaste keuze boven auto, auto volgt de browsertaal; bij een
+// onbekende of ontbrekende browsertaal blijft de interface in het Nederlands
+// (de moedertaal van de app), want dan staat het veld op "auto" en is er
+// verder niets te kiezen.
+function uiTaal() {
+  const v = (uiTaalSelect && uiTaalSelect.value) || "auto";
+  if (v === "nl" || v === "en") return v;
+  const nav = String((navigator && navigator.language) || "");
+  if (!nav) return "nl"; // geen browsertaal bekend (oude browser, sandbox): moedertaal
+  return nav.toLowerCase().replace("_", "-").startsWith("nl") ? "nl" : "en";
+}
+
+// T(sleutel, vervangers): tekst uit het woordenboek van de actieve
+// interface-taal, met {placeholder}-vervanging. Ontbreekt een sleutel in de
+// voorkeurstaal dan valt T terug op het Nederlands; ontbreekt hij ook daar,
+// dan komt de sleutel zelf terug - een ontbrekende vertaling is dan zicht-
+// baar in de interface in plaats van onzichtbaar.
+function T(sleutel, vervangers) {
+  const t = UI_TEKSTEN[uiTaal()] || UI_TEKSTEN.nl;
+  let s = t[sleutel];
+  if (s === undefined) s = UI_TEKSTEN.nl[sleutel];
+  if (s === undefined) return sleutel;
+  if (vervangers) {
+    for (const k of Object.keys(vervangers)) s = s.split("{" + k + "}").join(String(vervangers[k]));
+  }
+  return s;
+}
+
+// Statieveel vertalen: elk element met data-i18n (tekst), data-i18n-html
+// (tekst met markup, zoals de footer en de labels met hint-span),
+// data-i18n-title, data-i18n-ph (placeholder) of data-i18n-aria (aria-label)
+// krijgt de woordenboekversie van de actieve taal; <html lang> en de
+// documenttitel volgen mee. Nieuw statieveel: geef het element het
+// data-attribuut met een sleutel en voeg die sleutel in BEIDE talen aan
+// UI_TEKSTEN toe; test 43(e) telt de attributen en faalt bij een eenzijdige
+// toevoeging.
+function vertaalUi() {
+  const taal = uiTaal();
+  if (typeof document === "undefined" || !document) return;
+  if (document.documentElement) document.documentElement.lang = taal;
+  document.title = T("paginatitel");
+  const els = document.querySelectorAll
+    ? document.querySelectorAll("[data-i18n],[data-i18n-html],[data-i18n-title],[data-i18n-ph],[data-i18n-aria]")
+    : [];
+  for (const el of els) {
+    if (!el.getAttribute) continue;
+    const kh = el.getAttribute("data-i18n-html");
+    const k = kh != null ? kh : el.getAttribute("data-i18n");
+    if (k != null) {
+      if (kh != null) el.innerHTML = T(k);
+      else el.textContent = T(k);
+    }
+    const kt = el.getAttribute("data-i18n-title");
+    if (kt != null) el.setAttribute("title", T(kt));
+    const kp = el.getAttribute("data-i18n-ph");
+    if (kp != null) el.setAttribute("placeholder", T(kp));
+    const ka = el.getAttribute("data-i18n-aria");
+    if (ka != null) el.setAttribute("aria-label", T(ka));
+  }
+}
+
+// Sleutels in deze dictionary zijn contract: index.html verwijst met
+// data-i18n-sleutels naar de NL/EN-paren hieronder, en de runtime-strings
+// van de statusbalk, de kaarten en de geschiedenis (T()-aanroepen in
+// app.js) delen dezelfde lijst. De prioriteits- en taallopen van de
+// selectlists worden wél meevertaald, maar de OPTIEWAARDEN ("Laag", ...) niet
+// - die staan zo in de brief en in de CVSS-techniek van de kaarten.
+const UI_TEKSTEN = {
+  nl: {
+    "paginatitel": "Advisory Writer — Security Advisories",
+    "header.sub": "Genereer security advisories — vul alleen de CVE's in; de tekstvelden zijn optioneel.",
+    "kop.invoer": "Invoer",
+    "label.cve": "CVE's <span class=\"hint\">(een per regel of gescheiden door komma's)</span>",
+    "label.titel": "Advisorytitel <span class=\"hint\">(optioneel, wordt automatisch gegenereerd)</span>",
+    "ph.titel": "Kritieke kwetsbaarheden in nginx",
+    "label.ref": "Advisorynummer <span class=\"hint\">(optioneel)</span>",
+    "label.datum": "Publicatiedatum/tijd",
+    "label.prioriteit": "Prioriteit <span class=\"hint\">(handmatig; auto = zwaarste CVSS over alle CVE's)</span>",
+    "opt.pri.auto": "Automatisch (op basis van CVSS)",
+    "opt.pri.laag": "Laag", "opt.pri.middel": "Middel", "opt.pri.hoog": "Hoog", "opt.pri.kritiek": "Kritiek",
+    "label.taal": "Beschrijvingstaal <span class=\"hint\">(taal van de opgehaalde CVE-beschrijvingen; de brief zelf blijft Nederlands)</span>",
+    "taal.title": "Welk beschrijvingsexemplaar van de CVE's op de kaarten en in Technische Details komt; bij ontbreken van de voorkeurstaal valt dit terug op Engels en dan op de eerste beschrijving",
+    "opt.taal.auto": "Automatisch (browsertaal)",
+    "opt.taal.nl": "Nederlands (waar beschikbaar)",
+    "opt.taal.en": "Engels",
+    "label.uitaal": "Interfacetaal <span class=\"hint\">(taal van de app; de advisory-brief blijft Nederlands)</span>",
+    "uitaal.title": "Taal van bediening, statusmeldingen en CVE-kaarten; de advisory en de CVE-beschrijvingen volgen eigen keuzes",
+    "opt.uitaal.auto": "Automatisch (browsertaal)",
+    "opt.uitaal.nl": "Nederlands",
+    "opt.uitaal.en": "English",
+    "label.versie": "Advisoryversie <span class=\"hint\">(standaard 1.0; verhoog bij een herissue, bijv. 1.1)</span>",
+    "label.apikey": "NVD API-sleutel <span class=\"hint\">(optioneel; verhoogt de NVD-limiet van 5 naar 50 req/30 s)</span>",
+    "ph.apikey": "gratis aan te vragen op nvd.nist.gov (verplicht bij vele CVE's tegelijk)",
+    "summary.textvelden": "Tekstvelden voor de brief <span class=\"hint\">(aanhef, aankondiging, impact, adviezen, geadresseerden)</span>",
+    "label.aanhef": "Aanhef <span class=\"hint\">(optioneel, bijv. \"Beste NS-collega,\")</span>",
+    "ph.aanhef": "Beste NS-collega,",
+    "label.meldpunt": "Meldpunt <span class=\"hint\">(voor de centralisatie-alinea)</span>",
+    "ph.meldpunt": "CERT via cert@cert.nl",
+    "label.opening": "Opening <span class=\"hint\">(optionele alinea vóór de titel, bijv. \"Graag jullie zorgvuldige aandacht voor het onderstaande bericht.\")</span>",
+    "ph.opening": "Graag jullie zorgvuldige aandacht voor het urgente onderstaande bericht.",
+    "label.ankondiger": "Aangekondigd door <span class=\"hint\">(optioneel; anders vendor uit NVD)</span>",
+    "ph.ankondiger": "Xint en F5/nginx",
+    "label.ankonddatum": "Aankondigingsdatum <span class=\"hint\">(optioneel; anders publicatiedatum)</span>",
+    "ph.ankonddatum": "18 november 2026",
+    "label.bijnaam": "Bijnaam <span class=\"hint\">(optioneel, bijv. nginx2root)</span>",
+    "ph.bijnaam": "sshhole",
+    "label.impact": "Impact <span class=\"hint\">(vrije tekst; anders automatisch gegenereerde standaardimpact)</span>",
+    "ph.impact": "Een succesvolle aanval kan leiden tot ...",
+    "label.handel": "Eigen handelingsperspectieven <span class=\"hint\">één per regel; worden vóór de standaardadviezen geplaatst (bijv. interne systemen, AKS, RSMAN)</span>",
+    "ph.handel": "Amazon Kubernetes Service: patch deze meteen.\nRSMAN\nBodyCam APIs",
+    "label.stroom": "Stroomschema <span class=\"hint\">(optioneel; afbeelding-URL die onder de Handelingsperspectieven & Adviezen komt te staan, bijv. een eigen beslisboom of procesplaatje)</span>",
+    "label.gead": "Geadresseerden <span class=\"hint\">(optioneel; wordt \"Deze mail is gestuurd aan: ...\")</span>",
+    "ph.gead": "IT leads, IT managers, BISO's, TISO's, CTI en CSO",
+    "vink.vers": "Vers ophalen (geen cache)",
+    "vink.vers.title": "Opgeslagen CVE-gegevens (1 uur per browsersessie) overslaan en alles opnieuw bij NVD ophalen",
+    "knop.ophalen": "Ophalen & genereren",
+    "knop.kopieer": "Markdown kopiëren",
+    "knop.download": ".md downloaden",
+    "knop.pdf": "PDF exporteren",
+    "knop.pdf.title": "Download de advisory als PDF-bestand (jsPDF); vink „PDF via printdialoog” aan voor de browserprintdialoog met alle HTML-opmaak",
+    "knop.pdfopmaak": "PDF met opmaak",
+    "knop.pdfopmaak.title": "Download de advisory als PDF met alle HTML-opmaak (tabelkaders, badges en het stroomschema-beeld): html2canvas fotografeert de preview als raster. Tekst is dan niet selecteerbaar; ontbreekt de CDN of faalt het tekenen, dan opent de printdialoog",
+    "vink.print": "PDF via printdialoog",
+    "vink.print.title": "Genereer de PDF via de browserprintdialoog in plaats van de ingebouwde jsPDF-download (bijv. om vooraf te kijken of de opmaak klopt)",
+    "knop.deellink": "Deellink kopiëren",
+    "knop.deellink.title": "Kopieer een link met de ingevulde CVE's (?cve=...); de ontvanger opent de app met directe generatie",
+    "knop.wissen": "Velden wissen",
+    "knop.wissen.title": "Wis alle ingevulde velden en herstel de standaardwaarden",
+    "hint.geheugen": "Ingevulde velden worden automatisch onthouden in deze browser (LocalStorage) en bij een volgend bezoek hersteld; het laatste resultaat wordt na herladen teruggezet. Opgehaalde CVE-gegevens worden één uur per browsersessie gecachet (vink „Vers ophalen” aan om die te omzeilen). Met „Velden wissen” keer je terug naar de standaardwaarden.",
+    "kop.cvegegevens": "CVE-gegevens <span class=\"hint\">(NVD API 2.0 — controleer en bewerk waar nodig; de beschrijving is bewerkbaar en de wijziging komt direct in de advisory)</span>",
+    "kop.resultaat": "Resultaat",
+    "tab.preview": "Rendered",
+    "tab.markdown": "Markdown",
+    "knop.regen": "Opnieuw genereren uit velden",
+    "knop.regen.title": "Bouw de tekst opnieuw uit de ingevulde velden en verwerp handmatige bewerkingen",
+    "label.gesch": "Geschiedenis:",
+    "label.gesch.title": "De laatste 8 gegenereerde advisory's in deze browser; herstel bevat ook de briefvelden van dat moment",
+    "opt.leeg": "(leeg)",
+    "hist-label.ph": "eigen naam van deze regel",
+    "hist-label.aria": "Eigen naam voor de geselecteerde geschiedenisregel",
+    "hist-label.title": "Geef de geselecteerde geschiedenisregel een eigen naam (bijv. ‘Testomgeving maart’). Enter of klik ernaast bewaart; leeg laten maakt de regel weer naamloos.",
+    "knop.histdel": "Wis item",
+    "knop.histdel.title": "Verwijder het geselecteerde geschiedenisitem",
+    "knop.histclear": "Wis alles",
+    "knop.histclear.title": "Wis de volledige geschiedenislijst (het laatste resultaat voor staatsherstel blijft apart bewaard)",
+    "raw.aria": "Advisorytekst in Markdown, handmatig bewerkbaar",
+    "raw.title": "Handmatig bewerkbaar; veldwijzigingen bouwen de tekst daarna niet meer over (knop 'Opnieuw genereren uit velden')",
+    "footer": "Databronnen: <a href=\"https://nvd.nist.gov/developers/vulnerabilities\" target=\"_blank\">NVD API 2.0</a> · <a href=\"https://cveproject.github.io/docs/api\" target=\"_blank\">CVE Program API</a> · <a href=\"https://www.cisa.gov/known-exploited-vulnerabilities-catalog\" target=\"_blank\">CISA KEV</a> (actief misbruik) · <a href=\"https://api.first.org/data/v1/epss\" target=\"_blank\">FIRST EPSS</a> (exploitkans). Raadpleeg voor productinformatie de distributeurtrackers (Debian, Ubuntu, Red Hat, SUSE, Fedora, Amazon Linux en Alpine; extra per-CVE-links zoals Rocky Linux en Arch Linux komen uit de NVD-referenties). PDF-export via <a href=\"https://github.com/parallax/jsPDF\" target=\"_blank\">jsPDF</a> en, voor de download met HTML-opmaak, <a href=\"https://html2canvas.hertzen.com/\" target=\"_blank\">html2canvas</a> (CDN's; de printdialoog blijft de terugval).",
+    "knop.retry": "Probeer opnieuw",
+    "knop.retry.title": "Haal alles opnieuw op: probeert uitgevallen bronnen en mislukte nummers opnieuw (geslaagde nummers komen uit de cache)",
+    // ---- runtime: statusbalk, kaarten en geschiedenis ---------------------
+    "reset.vraag": "Alle ingevulde velden wissen en terugkeren naar de standaardwaarden?",
+    "disclaimer.geladen": "Disclaimer: geladen uit {bestand} ({aantal} tekens).",
+    "disclaimer.standaard": "Disclaimer: ingebouwde standaardtekst. Plaats disclaimer.md in de projectmap voor eigen tekst (via http-server).",
+    "status.afgewezen": "Afgewezen",
+    "status.afgewezen.note": "Deze CVE is door de CNA afgewezen (rejected) — controleer of het juiste nummer is gebruikt.",
+    "status.nogan": "Nog niet geanalyseerd",
+    "status.nogan.note": "De NVD-analyse is nog niet gereed; de gegevens zijn (voorlopig) uitsluitend door de CNA aangeleverd.",
+    "status.nvd-poging": "{id}: NVD niet bereikbaar/gevonden ({reden}) — CVE Program API proberen...",
+    "stroom.geweigerd": "Stroomschema-URL geweigerd ({schema}) — alleen http(s), relatief of data:image toegestaan: {url}",
+    "stroom.hersteld": "Stroomschema-URL weer geaccepteerd; het beeld staat weer in de advisory.",
+    "status.opnieuw": "Advisory opnieuw gegenereerd uit de velden.",
+    "hist.hersteld": "Advisory uit geschiedenis ({wie}{label}) hersteld, inclusief de veldwaarden van dat moment. Klik op „Ophalen & genereren” voor actuele gegevens.",
+    "hist.leeg": "(leeg)",
+    "hist.handmatig": "(handmatig)",
+    "state.hersteld": "Laatste resultaat hersteld uit deze browser. Klik op „Ophalen & genereren” voor actuele data.",
+    "kaart.geen-gegevens": "Geen gegevens",
+    "kaart.mislukt": "Gegevens konden niet worden opgehaald (NVD en CVE Program API niet bereikbaar of onbekend nummer). Controleer het nummer en klik nogmaals op „Ophalen & genereren”.",
+    "kaart.niet-beschikbaar": "Niet beschikbaar",
+    "kaart.kev-onbekend": "KEV-status onbekend",
+    "kaart.kev-actief": "KEV: actief misbruik",
+    "kaart.sinds": "sinds",
+    "kaart.poc": "Exploit (PoC) beschikbaar",
+    "kaart.kev-geen": "KEV: geen actief misbruik",
+    "kaart.desc-label": "Beschrijving van {id}, bewerkbaar",
+    "kaart.desc-title": "Bewerkbaar: wijzigingen komen direct in de advisory",
+    "kaart.publicatie": "Publicatie:",
+    "kaart.producten": "Producten:",
+    "kaart.geen-producten": "(geen productdata — controleer distributeur)",
+    "kaart.cveprog": "NVD niet bereikbaar/gegevens onvolledig: data afkomstig van de CVE Program API (door de CNA aangeleverd).",
+    "gen.ongeldig": "Voer minstens één geldig CVE-nummer in (formaat CVE-2026-123158).",
+    "gen.niet-herkend": " Niet als CVE herkend: {lijst}.",
+    "gen.onverwacht": "Genereren mislukt door een onverwachte fout: {reden}.",
+    "gen.start.1": "Ophalen van {aantal} CVE ({net} op te halen{cache})...",
+    "gen.start.n": "Ophalen van {aantal} CVE's ({net} op te halen{cache})...",
+    "gen.cache-uit": ", {n} uit cache",
+    "gen.voortgang": "Ophalen {id} — {i}/{n} voltooid...",
+    "gen.mislukt": "Ophalen mislukt voor: {lijst}. Controleer de nummers en/of netwerktogang.",
+    "gen.klaar-deel": "Klaar. {ok} CVE(s) verwerkt{cache}, {mis} mislukt ({lijst}); advisory voor zover mogelijk gegenereerd.",
+    "gen.klaar": "Klaar. {ok} CVE(s) verwerkt{cache} en advisory gegenereerd.",
+    "gen.cache-deel": ", {n} uit cache (vink \"Vers ophalen\" aan voor actuele data)",
+    "gen.epss-uit": " EPSS niet beschikbaar (api.first.org).",
+    "kopieer.gelukt": "Markdown gekopieerd naar klembord.",
+    "kopieer.mislukt": "Kopiëren mislukt: klembord niet beschikbaar (de app vereist https of localhost).",
+    "share.gelukt": "Deellink gekopieerd: {url}",
+    "share.url": "Deellink: {url}",
+    "hist.verwijderd": "Geschiedenisitem verwijderd.",
+    "hist.gewist": "Geschiedenis gewist.",
+    "hist.kies-eerst": "Kies eerst een geschiedenisregel: het labelveld geeft die regel een eigen naam.",
+    "hist.niet-vinden": "Geschiedenisregel niet gevonden (intussen gewist?).",
+    "hist.hernoemd": "Geschiedenisregel hernoemd naar “{naam}”.",
+    "hist.naamloos": "Eigen naam verwijderd; de regel toont weer alleen het tijdstempel.",
+    "pdf.jspdf-klaar": "PDF gedownload als PDF-bestand (jsPDF). Voor de printdialoog met alle opmaak: vink “PDF via printdialoog” aan.",
+    "pdf.print-open-fout": "Printdialoog kon niet worden geopend; gebruik de browserprint (Ctrl/Cmd+P).",
+    "pdf.print-geopend": "Printdialoog geopend — kies daar “Opslaan als PDF” / “Save as PDF”.",
+    "pdf.h2c-ontbreekt": "html2canvas en/of jsPDF niet geladen (CDN traag of geblokkeerd); printdialoog als terugval.",
+    "pdf.h2c-run": "PDF met opmaak samenstellen (preview fotograferen)...",
+    "pdf.h2c-klaar": "PDF met opmaak gedownload (raster: tekst is niet selecteerbaar).",
+    "pdf.h2c-fout": "html2canvas-export mislukt; printdialoog als terugval.",
+  },
+  en: {
+    "paginatitel": "Advisory Writer — Security Advisories",
+    "header.sub": "Generate security advisories — fill in only the CVE numbers; the text fields are optional.",
+    "kop.invoer": "Input",
+    "label.cve": "CVE numbers <span class=\"hint\">(one per line or comma-separated)</span>",
+    "label.titel": "Advisory title <span class=\"hint\">(optional, generated automatically)</span>",
+    "ph.titel": "Critical vulnerabilities in nginx",
+    "label.ref": "Advisory number <span class=\"hint\">(optional)</span>",
+    "label.datum": "Publication date/time",
+    "label.prioriteit": "Priority <span class=\"hint\">(manual; auto = heaviest CVSS across all CVEs)</span>",
+    "opt.pri.auto": "Automatic (based on CVSS)",
+    "opt.pri.laag": "Low", "opt.pri.middel": "Medium", "opt.pri.hoog": "High", "opt.pri.kritiek": "Critical",
+    "label.taal": "Description language <span class=\"hint\">(language of the fetched CVE descriptions; the letter itself stays Dutch)</span>",
+    "taal.title": "Which description copy of the CVEs appears on the cards and in Technical Details; if the preferred language is missing it falls back to English and then to the first description",
+    "opt.taal.auto": "Automatic (browser language)",
+    "opt.taal.nl": "Dutch (where available)",
+    "opt.taal.en": "English",
+    "label.uitaal": "Interface language <span class=\"hint\">(language of the app; the advisory letter stays Dutch)</span>",
+    "uitaal.title": "Language of the controls, status messages and CVE cards; the advisory and the CVE descriptions follow their own choices",
+    "opt.uitaal.auto": "Automatic (browser language)",
+    "opt.uitaal.nl": "Nederlands",
+    "opt.uitaal.en": "English",
+    "label.versie": "Advisory version <span class=\"hint\">(default 1.0; raise on a reissue, e.g. 1.1)</span>",
+    "label.apikey": "NVD API key <span class=\"hint\">(optional; raises the NVD limit from 5 to 50 req/30 s)</span>",
+    "ph.apikey": "free to request at nvd.nist.gov (required for many CVEs at once)",
+    "summary.textvelden": "Letter text fields <span class=\"hint\">(salutation, announcement, impact, advice, addressees)</span>",
+    "label.aanhef": "Salutation <span class=\"hint\">(optional, e.g. \"Dear colleague,\")</span>",
+    "ph.aanhef": "Dear colleague,",
+    "label.meldpunt": "Reporting point <span class=\"hint\">(for the centralisation paragraph)</span>",
+    "ph.meldpunt": "CERT via cert@cert.nl",
+    "label.opening": "Opening <span class=\"hint\">(optional paragraph before the title, e.g. \"Please give the message below your careful attention.\")</span>",
+    "ph.opening": "Please give the urgent message below your careful attention.",
+    "label.ankondiger": "Announced by <span class=\"hint\">(optional; otherwise vendor from NVD)</span>",
+    "ph.ankondiger": "Xint and F5/nginx",
+    "label.ankonddatum": "Announcement date <span class=\"hint\">(optional; otherwise publication date)</span>",
+    "ph.ankonddatum": "18 November 2026",
+    "label.bijnaam": "Nickname <span class=\"hint\">(optional, e.g. nginx2root)</span>",
+    "ph.bijnaam": "sshhole",
+    "label.impact": "Impact <span class=\"hint\">(free text; otherwise an auto-generated standard impact)</span>",
+    "ph.impact": "A successful attack may lead to ...",
+    "label.handel": "Own courses of action <span class=\"hint\">one per line; placed before the standard advice (e.g. internal systems, AKS, RSMAN)</span>",
+    "ph.handel": "Amazon Kubernetes Service: patch this immediately.\nRSMAN\nBodyCam APIs",
+    "label.stroom": "Flowchart <span class=\"hint\">(optional; image URL shown below the courses of action & advice, e.g. your own decision tree or process image)</span>",
+    "label.gead": "Addressees <span class=\"hint\">(optional; becomes \"This mail was sent to: ...\")</span>",
+    "ph.gead": "IT leads, IT managers, BISOs, TISOs, CTI and CSO",
+    "vink.vers": "Fresh fetch (no cache)",
+    "vink.vers.title": "Skip the stored CVE data (1 hour per browser session) and fetch everything from NVD again",
+    "knop.ophalen": "Fetch & generate",
+    "knop.kopieer": "Copy Markdown",
+    "knop.download": "Download .md",
+    "knop.pdf": "Export PDF",
+    "knop.pdf.title": "Download the advisory as a PDF file (jsPDF); tick “PDF via print dialog” for the browser print dialog with all HTML formatting",
+    "knop.pdfopmaak": "Formatted PDF",
+    "knop.pdfopmaak.title": "Download the advisory as a PDF with all HTML formatting (table borders, badges and the flowchart image): html2canvas photographs the preview as a raster. Text is then not selectable; if the CDN is missing or drawing fails, the print dialog opens",
+    "vink.print": "PDF via print dialog",
+    "vink.print.title": "Generate the PDF via the browser print dialog instead of the built-in jsPDF download (e.g. to check the formatting first)",
+    "knop.deellink": "Copy share link",
+    "knop.deellink.title": "Copy a link with the filled-in CVEs (?cve=...); the recipient opens the app with immediate generation",
+    "knop.wissen": "Clear fields",
+    "knop.wissen.title": "Clear all filled-in fields and restore the defaults",
+    "hint.geheugen": "Filled-in fields are remembered automatically in this browser (LocalStorage) and restored on the next visit; the last result is restored after reloading. Fetched CVE data is cached for one hour per browser session (tick “Fresh fetch” to bypass it). “Clear fields” returns you to the defaults.",
+    "kop.cvegegevens": "CVE data <span class=\"hint\">(NVD API 2.0 — check and edit where needed; the description is editable and changes go straight into the advisory)</span>",
+    "kop.resultaat": "Result",
+    "tab.preview": "Rendered",
+    "tab.markdown": "Markdown",
+    "knop.regen": "Regenerate from fields",
+    "knop.regen.title": "Rebuild the text from the filled-in fields and discard manual edits",
+    "label.gesch": "History:",
+    "label.gesch.title": "The last 8 generated advisories in this browser; restore also includes the letter fields of that moment",
+    "opt.leeg": "(empty)",
+    "hist-label.ph": "your own name for this entry",
+    "hist-label.aria": "Own name for the selected history entry",
+    "hist-label.title": "Give the selected history entry your own name (e.g. ‘Test environment March’). Enter or click away saves; leaving it empty makes the entry nameless again.",
+    "knop.histdel": "Delete entry",
+    "knop.histdel.title": "Delete the selected history entry",
+    "knop.histclear": "Clear all",
+    "knop.histclear.title": "Clear the entire history list (the last result for state restore is kept separately)",
+    "raw.aria": "Advisory text in Markdown, manually editable",
+    "raw.title": "Manually editable; field changes no longer rebuild the text afterwards (button 'Regenerate from fields')",
+    "footer": "Data sources: <a href=\"https://nvd.nist.gov/developers/vulnerabilities\" target=\"_blank\">NVD API 2.0</a> · <a href=\"https://cveproject.github.io/docs/api\" target=\"_blank\">CVE Program API</a> · <a href=\"https://www.cisa.gov/known-exploited-vulnerabilities-catalog\" target=\"_blank\">CISA KEV</a> (active exploitation) · <a href=\"https://api.first.org/data/v1/epss\" target=\"_blank\">FIRST EPSS</a> (exploit probability). For product information consult the distributor trackers (Debian, Ubuntu, Red Hat, SUSE, Fedora, Amazon Linux and Alpine; additional per-CVE links such as Rocky Linux and Arch Linux come from the NVD references). PDF export via <a href=\"https://github.com/parallax/jsPDF\" target=\"_blank\">jsPDF</a> and, for the download with HTML formatting, <a href=\"https://html2canvas.hertzen.com/\" target=\"_blank\">html2canvas</a> (CDNs; the print dialog remains the fallback).",
+    "knop.retry": "Try again",
+    "knop.retry.title": "Fetch everything again: retries failed sources and failed numbers (successful numbers come from the cache)",
+    // ---- runtime: statusbalk, kaarten en geschiedenis ---------------------
+    "reset.vraag": "Clear all filled-in fields and return to the defaults?",
+    "disclaimer.geladen": "Disclaimer: loaded from {bestand} ({aantal} characters).",
+    "disclaimer.standaard": "Disclaimer: built-in standard text. Place disclaimer.md in the project folder for your own text (via http-server).",
+    "status.afgewezen": "Rejected",
+    "status.afgewezen.note": "This CVE was rejected by the CNA — check that the right number was used.",
+    "status.nogan": "Not yet analysed",
+    "status.nogan.note": "The NVD analysis is not ready yet; the data was (provisionally) supplied only by the CNA.",
+    "status.nvd-poging": "{id}: NVD unreachable/not found ({reden}) — trying the CVE Program API...",
+    "stroom.geweigerd": "Flowchart URL rejected ({schema}) — only http(s), relative or data:image allowed: {url}",
+    "stroom.hersteld": "Flowchart URL accepted again; the image is back in the advisory.",
+    "status.opnieuw": "Advisory regenerated from the fields.",
+    "hist.hersteld": "Advisory restored from history ({wie}{label}), including the field values of that moment. Click “Fetch & generate” for current data.",
+    "hist.leeg": "(empty)",
+    "hist.handmatig": "(manual)",
+    "state.hersteld": "Last result restored from this browser. Click “Fetch & generate” for current data.",
+    "kaart.geen-gegevens": "No data",
+    "kaart.mislukt": "Data could not be fetched (NVD and CVE Program API unreachable or unknown number). Check the number and click “Fetch & generate” again.",
+    "kaart.niet-beschikbaar": "Not available",
+    "kaart.kev-onbekend": "KEV status unknown",
+    "kaart.kev-actief": "KEV: actively exploited",
+    "kaart.sinds": "since",
+    "kaart.poc": "Exploit (PoC) available",
+    "kaart.kev-geen": "KEV: no active exploitation",
+    "kaart.desc-label": "Description of {id}, editable",
+    "kaart.desc-title": "Editable: changes go straight into the advisory",
+    "kaart.publicatie": "Publication:",
+    "kaart.producten": "Products:",
+    "kaart.geen-producten": "(no product data — check distributor)",
+    "kaart.cveprog": "NVD unreachable/data incomplete: data from the CVE Program API (supplied by the CNA).",
+    "gen.ongeldig": "Enter at least one valid CVE number (format CVE-2026-123158).",
+    "gen.niet-herkend": " Not recognised as CVE: {lijst}.",
+    "gen.onverwacht": "Generation failed due to an unexpected error: {reden}.",
+    "gen.start.1": "Fetching {aantal} CVE ({net} to fetch{cache})...",
+    "gen.start.n": "Fetching {aantal} CVEs ({net} to fetch{cache})...",
+    "gen.cache-uit": ", {n} from cache",
+    "gen.voortgang": "Fetching {id} — {i}/{n} done...",
+    "gen.mislukt": "Fetch failed for: {lijst}. Check the numbers and/or network access.",
+    "gen.klaar-deel": "Done. {ok} CVE(s) processed{cache}, {mis} failed ({lijst}); advisory generated as far as possible.",
+    "gen.klaar": "Done. {ok} CVE(s) processed{cache}, advisory generated.",
+    "gen.cache-deel": ", {n} from cache (tick “Fresh fetch” for current data)",
+    "gen.epss-uit": " EPSS unavailable (api.first.org).",
+    "kopieer.gelukt": "Markdown copied to clipboard.",
+    "kopieer.mislukt": "Copy failed: clipboard unavailable (the app requires https or localhost).",
+    "share.gelukt": "Share link copied: {url}",
+    "share.url": "Share link: {url}",
+    "hist.verwijderd": "History entry deleted.",
+    "hist.gewist": "History cleared.",
+    "hist.kies-eerst": "Select a history entry first: the label field gives that entry a name.",
+    "hist.niet-vinden": "History entry not found (deleted in the meantime?).",
+    "hist.hernoemd": "History entry renamed to “{naam}”.",
+    "hist.naamloos": "Own name removed; the entry shows only the timestamp again.",
+    "pdf.jspdf-klaar": "PDF downloaded as a PDF file (jsPDF). For the print dialog with all formatting: tick “PDF via print dialog”.",
+    "pdf.print-open-fout": "Print dialog could not be opened; use the browser print (Ctrl/Cmd+P).",
+    "pdf.print-geopend": "Print dialog opened — choose “Save as PDF” there.",
+    "pdf.h2c-ontbreekt": "html2canvas and/or jsPDF not loaded (CDN slow or blocked); print dialog as fallback.",
+    "pdf.h2c-run": "Composing formatted PDF (photographing the preview)...",
+    "pdf.h2c-klaar": "Formatted PDF downloaded (raster: text is not selectable).",
+    "pdf.h2c-fout": "html2canvas export failed; print dialog as fallback.",
+  },
+};
+
 const STORAGE_KEY = "advisory-writer:velden-v1";
 const MEMORIZED_FIELDS = [
-  "cve-input", "advisory-title", "advisory-ref", "pub-date", "prioriteit-select",
+  "cve-input", "advisory-title", "advisory-ref", "pub-date", "prioriteit-select", "taal-select",
+  "ui-taal",
   "aanhef", "meldpunt", "opening", "aankondiger", "aankondiging-datum", "bijnaam",
   "impact", "handelingsperspectieven", "stroomschema", "geadresseerden", "advisory-versie", "nvd-apikey",
   "no-cache", "pdf-print",
@@ -180,7 +567,7 @@ function initFieldMemory() {
   const resetBtn = $("#reset-btn");
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
-      if (!confirm("Alle ingevulde velden wissen en terugkeren naar de standaardwaarden?")) return;
+      if (!confirm(T("reset.vraag"))) return;
       try { localStorage.removeItem(STORAGE_KEY); } catch { /* leeg al */ }
       veldenCache = null; // de in-memory kop moet meewissen (fix 6)
       clearCveCache(); // ook de CVE-fetchcache leeg: wissen = écht opnieuw
@@ -212,7 +599,7 @@ async function loadDisclaimer() {
         if (text) {
           disclaimerText = text;
           if (disclaimerStatusEl)
-            disclaimerStatusEl.textContent = `Disclaimer: geladen uit \`${fname}\` (${text.length} tekens).`;
+            disclaimerStatusEl.textContent = T("disclaimer.geladen", { bestand: "`" + fname + "`", aantal: text.length });
           return true;
         }
       }
@@ -222,8 +609,7 @@ async function loadDisclaimer() {
   }
   disclaimerText = null;
   if (disclaimerStatusEl)
-    disclaimerStatusEl.textContent =
-      "Disclaimer: ingebouwde standaardtekst. Plaats \`disclaimer.md\` in de projectmap voor eigen tekst (via http-server).";
+    disclaimerStatusEl.textContent = T("disclaimer.standaard");
   return false;
 }
 
@@ -480,12 +866,27 @@ function epssRegelTekst(cve) {
 // na 400 ms meldingsstilte valt de vlag weg, zodat de definitieve melding
 // wéér wordt voorgelezen (fix 6).
 let statusBusyTimer = null;
-function setStatus(msg, isError = false) {
+// Laatste melding onthouden voor de taalwissel: meldingen die via een
+// woordenboeksleutel zijn gezet (statusT) kunnen bij een wissel van
+// interfacetaal in de nieuwe taal worden herschreven (herhaalStatus);
+// samengestelde meldingen (meerdere stukken in één setStatus) blijven in
+// de taal waarin ze zijn begonnen.
+let statusLaatste = { msg: "", isError: false, sleutel: null, vervangers: null };
+function setStatus(msg, isError = false, sleutel = null, vervangers = null) {
+  statusLaatste = { msg, isError, sleutel, vervangers };
   statusEl.textContent = msg;
   statusEl.style.color = isError ? "#f87171" : "";
   statusEl.setAttribute("aria-busy", "true");
   clearTimeout(statusBusyTimer);
   statusBusyTimer = setTimeout(() => statusEl.removeAttribute("aria-busy"), 400);
+}
+function statusT(sleutel, vervangers, isError = false) {
+  setStatus(T(sleutel, vervangers), isError, sleutel, vervangers);
+}
+function herhaalStatus() {
+  const s = statusLaatste;
+  if (s.sleutel) statusT(s.sleutel, s.vervangers, s.isError);
+  else if (s.msg) setStatus(s.msg, s.isError);
 }
 
 // Maak een token uit het CVE-veld gelijkvormig: leestekens aan de rand af-
@@ -563,6 +964,15 @@ function mapSeverity(sev) {
   return SEVERITY_MAP[(sev || "").toUpperCase()] || { prioriteit: "Onbekend", badge: "unknown" };
 }
 
+// Ernstlabel op de kaart in de actieve interface-taal. De brief gebruikt
+// altijd mapSeverity().prioriteit (Nederlands); de kaart volgt de taal-
+// keuze van de bediening.
+const ERNT_EN = { Laag: "Low", Middel: "Medium", Hoog: "High", Kritiek: "Critical", Onbekend: "Unknown" };
+function ernstLabel(sev) {
+  const p = mapSeverity(sev).prioriteit;
+  return uiTaal() === "en" ? (ERNT_EN[p] || p) : p;
+}
+
 // De enige HTML-escape van de app (fix 6): ook mdToHtml gebruikt deze
 // helper (via esc), zodat er geen tweede, lichtere variant meer is die
 // stilzwijgend kan afwijken. De extra " ten opzichte van de oude interne
@@ -599,10 +1009,10 @@ function maxSeverity(list) {
 function cveStatus(cve) {
   const st = String(cve.vulnStatus || cve._state || "").toLowerCase();
   if (st === "rejected") {
-    return { label: "Afgewezen", note: "Deze CVE is door de CNA afgewezen (rejected) — controleer of het juiste nummer is gebruikt." };
+    return { label: T("status.afgewezen"), note: T("status.afgewezen.note") };
   }
   if (st === "received" || st === "awaiting analysis") {
-    return { label: "Nog niet geanalyseerd", note: "De NVD-analyse is nog niet gereed; de gegevens zijn (voorlopig) uitsluitend door de CNA aangeleverd." };
+    return { label: T("status.nogan"), note: T("status.nogan.note") };
   }
   return null;
 }
@@ -823,13 +1233,50 @@ function patchLine(cve, fallbackProduct) {
   return `${cve.id}: patch beschikbaar (${prod} ${fix}) \u2014 zie referenties.`;
 }
 
+// ---------- Taal van de CVE-beschrijvingen (optie 2: meertaligheid) -----
+// Een CVE-respons bevat per beschrijving een taaltag; de NVD levert waar
+// beschikbaar meerdere talen mee (naast het Engelse CNA-exemplaar soms een
+// NVD-vertaling), en de CNA-backstop levert wat de CNA zelf aanlevert - bij
+// Nederlandstalige CNAs soms gewoon Nederlands. De advisory-tekst is dat
+// niet: die is en blijft Nederlands. Deze voorkeur gaat daarom alleen over
+// de opgehaalde beschrijving, op de kaart en in Technische Details. Een
+// handmatig bewerkte beschrijving gaat altijd boven élke taalkeuze.
+// De UI zelf (koppen, labels, knoppen) blijft Nederlands: een volledige
+// Engelstalige interface is een groter karwei en is hier bewust buiten
+// beschouwing gelaten (zie README, optie "meertaligheid").
+function taalVoorkeur() {
+  const v = (typeof taalSelect !== "undefined" && taalSelect && taalSelect.value) || "auto";
+  if (v === "nl" || v === "en") return v;
+  // "auto": volg de taal van de browser (nl-* → Nederlands, anders Engels).
+  const nav = (typeof navigator !== "undefined" && navigator && navigator.language) || "";
+  return String(nav).toLowerCase().replace("_", "-").startsWith("nl") ? "nl" : "en";
+}
+
+// Het beschrijvingsexemplaar voor de voorkeurstaal, of null bij een lege
+// lijst. De valroute is bewust kort en voorspelbaar: eerst een exacte tag
+// (genormaliseerd, zodat "en-US" onder "en" valt), dan dezelfde hoofdtalige
+// (nl-BE telt voor "nl"), dan het Engelse exemplaar als wereldwijde
+// standaard, en anders de eerste beschrijving. Die laatste stap is precies
+// de oude vaste valroute, zodat een CVE zonder énige NL-beschrijving er bij
+// voorkeur "nl" op precies hetzelfde uitkomt als voorheen.
+function kiesBeschrijving(descriptions, voorkeur) {
+  const d = Array.isArray(descriptions) ? descriptions : [];
+  if (!d.length) return null;
+  const norm = (x) => String(x || "").toLowerCase().replace("_", "-");
+  const basis = (x) => norm(x).split("-")[0];
+  const taaltalig = (x) => x && typeof x === "object" && !!String(x.value || "").trim();
+  return d.find((x) => taaltalig(x) && norm(x.lang) === voorkeur)
+    || d.find((x) => taaltalig(x) && basis(x.lang) === voorkeur)
+    || d.find((x) => taaltalig(x) && basis(x.lang) === "en")
+    || d.find(taaltalig)
+    || null;
+}
+
 function bestDescription(cve) {
   // Een handmatig bewerkte beschrijving (op de CVE-kaart) heeft voorrang.
   if (cve._descEdit && cve._descEdit.trim()) return cve._descEdit.trim();
-  for (const d of cve.descriptions || []) {
-    if (d.lang === "en") return d.value;
-  }
-  return cve.descriptions?.[0]?.value || "(geen beschrijving beschikbaar)";
+  const d = kiesBeschrijving(cve.descriptions, taalVoorkeur());
+  return (d && d.value) || "(geen beschrijving beschikbaar)";
 }
 
 function bestReferences(cve) {
@@ -842,6 +1289,19 @@ function bestReferences(cve) {
     .slice(0, 6);
 }
 
+// Opslagvariant van de referenties voor compactAdvisory: de zes die de
+// advisory zelf toont (bestReferences), plus de eventuele
+// extra-trackerreferenties (Rocky/Arch). Die overleven de kap van zes
+// anders niet als ze erbuiten vallen, terwijl de distributeurregel er wél
+// een link op bouwt — zonder deze aanvulling verdwijnt zo'n link na
+// geschiedenisherstel. De Set werkt op objectidentiteit: wat al in de basis
+// zat, komt niet twee keer mee.
+function referentiesVoorOpslag(c) {
+  const basis = bestReferences(c);
+  const extra = (c.references || []).filter((r) => isExtraTrackerUrl(r.url));
+  return [...new Set([...basis, ...extra])];
+}
+
 // Compacte kopie van een CVE voor de browseropslag (geschiedenis én
 // staatsherstel): een volledige NVD-record is tienduizenden tekens, waarvan
 // de bouwer en de kaart het grootste deel nooit gebruiken — references
@@ -850,9 +1310,13 @@ function bestReferences(cve) {
 // buildMarkdown en renderCveCards nodig hebben: identiteit en status, de
 // CVSS-metrics, weaknesses, affected/configurations (product en patch),
 // publicatiedatum en de KEV-velden. Referenties worden gekapt op dezelfde
-// zes die de advisory zelf toont (bestReferences), beschrijvingen tot het
-// Engelse exemplaar plus het eerste (de valroute van bestDescription).
-// De originele objecten in de CVE-fetchcache blijven onaangeroerd: het is
+// zes die de advisory zelf toont (bestReferences), aangevuld met de
+// eventuele extra-trackerreferenties (referentiesVoorOpslag), en
+// beschrijvingen tot het Engelse exemplaar, het eerste én het exemplaar van
+// de huidige taalkeuze (de valroute van bestDescription; de taalkeuze-mee-
+// name zorgt dat een na geschiedenisherstel met voorkeur "nl" gebouwde
+// advisory alsnog op Engels terugvalt als de NL-beschrijving werd wegge-
+// compact). De originele objecten in de CVE-fetchcache blijven onaangeroerd: het is
 // een níeuw object, alleen de sub-arrays worden gedeeld (nooit gemuteerd).
 // Opgeslagen compacte items herstellen exact dezelfde advisory: herhaalde
 // compactie (bijv. kopiëren ná een herstel) levert opnieuw exact hetzelfde
@@ -860,15 +1324,19 @@ function bestReferences(cve) {
 function compactAdvisory(c) {
   if (c._fetchFailed) return { id: c.id, _fetchFailed: true }; // mislukte stub: niets te compacteren
   const d = Array.isArray(c.descriptions) ? c.descriptions : [];
-  // Eerste beschrijving plus het Engelse exemplaar (de volgorde van d blijft
-  // voorop staan, zodat herhaalde compactie — bijv. kopiëren ná een herstel
-  // — exact hetzelfde object oplevert); bestDescription kiest daarbinnen
-  // zelf het Engelse exemplaar, dus de advies-tekst is volgorde-onafhankelijk.
-  const besch = [...new Set([d[0], d.find((x) => x && x.lang === "en")].filter(Boolean))];
+  // Eerste beschrijving, het Engelse exemplaar en het exemplaar van de
+  // huidige taalkeuze (de volgorde van d blijft voorop staan, zodat
+  // herhaalde compactie — bijv. kopiëren ná een herstel — exact hetzelfde
+  // object oplevert; de taalknop is een identiek object uit dezelfde lijst,
+  // dus de Set voegt niets toe als de keuze al meekwam). bestDescription
+  // kiest daarbinnen zelf per taal, dus de advies-tekst is
+  // volgorde-onafhankelijk en taal-bestendig binnen één voorkeur.
+  const besch = [...new Set([d[0], d.find((x) => x && x.lang === "en"),
+    kiesBeschrijving(d, taalVoorkeur())].filter(Boolean))];
   const uit = {
     id: c.id,
     descriptions: besch,
-    references: bestReferences(c), // max 6, Vendor Advisory/Patch eerst — als de advisory zelf
+    references: referentiesVoorOpslag(c), // max 6 + extra-trackers, Vendor Advisory/Patch eerst
     metrics: c.metrics,
     weaknesses: c.weaknesses,
     affected: c.affected,
@@ -908,16 +1376,15 @@ function groepeerReferenties(list) {
 }
 
 // ---------- Distributeurtrackers ----------
-// Standaardcontrolelinks per CVE-nummer bij de zes Linux-distributietrackers
-// met een vast URL-formaat (vormen live geverifieerd 22-11-2026): Debian en
-// Ubuntu houden het nummer zoals het is, Red Hat gebruikt kleine letters.
-// SUSE laat het nummer staan met afsluitende slash (canonical vorm; een
-// aangevraagde slash-vorm werkt daar ook). Let op: een distributeur die een
-// CVE niet volgt, geeft op zo'n link een 404 - dat is géén fout van de link,
-// maar het antwoord van de tracker. Alpine heeft geen per-CVE-pagina (alleen
-// de secdb-overzichten per release) en blijft daarom weg. De links doen zelf
-// geen uitspraak over de pakketstatus in de omgeving van de lezer; ze zijn
-// het startpunt van de controle die de patchregel al aanraadt.
+// Standaardcontrolelinks per CVE-nummer bij de zeven Linux-distributie-
+// trackers met een vast URL-formaat (vormen live geverifieerd 22-11-2026,
+// Alpine 26-11-2026): Debian en Ubuntu houden het nummer zoals het is, Red
+// Hat gebruikt kleine letters. SUSE laat het nummer staan met afsluitende
+// slash (canonical vorm; een aangevraagde slash-vorm werkt daar ook). Let
+// op: een distributeur die een CVE niet volgt, geeft op zo'n link een 404 -
+// dat is géén fout van de link, maar het antwoord van de tracker. De links
+// doen zelf geen uitspraak over de pakketstatus in de omgeving van de lezer;
+// ze zijn het startpunt van de controle die de patchregel al aanraadt.
 // Uitbreidingsronde erbij: Amazon Linux via ALAS met .html-achtervoegsel
 // (live geverifieerd: alas.aws.amazon.com/cve/html/CVE-2024-6387.html toont
 // de platformstatus-tabel per release). Fedora via de officiële CVE-website
@@ -931,17 +1398,61 @@ const DISTRIBUTEUR_TRACKERS = [
   ["SUSE", (id) => `https://www.suse.com/security/cve/${id}/`],
   ["Fedora", (id) => `https://cve.fedoraproject.org/#/cve/${id}`],
   ["Amazon Linux", (id) => `https://alas.aws.amazon.com/cve/html/${id}.html`],
+  // Tweede uitbreidingsronde (optie 4): Alpine. De eerdere uitzetting "geen
+  // per-CVE-pagina" gold voor de secdb (alleen YAML-overzichten per
+  // release), maar de Alpine Security Tracker heeft die wél: per CVE toont
+  // die pagina de pakketstatus per branch (live geverifieerd 26-11-2026 aan
+  // CVE-2024-6387: "fixed" per release). Daarmee telt de vaste set zeven.
+  ["Alpine", (id) => `https://security.alpinelinux.org/vuln/${id}`],
 ];
 
+// Extra distributeurlinks uit de NVD-referenties zelf (optie 4):
+// distributeurs buiten de vaste set die een per-CVE-URL met het eigen
+// nummer in de referenties van dít CVE hebben, verdienen een extra
+// vermelding — zo'n referentie bestaat immers alleen als de distributeur
+// het nummer volgt. Patronen live waargenomen in NVD-referenties
+// (26-11-2026): Rocky Linux via sig-security.rocky.page en Arch Linux via
+// security.archlinux.org. Een URL met een ander CVE-nummer dan het eigen
+// (referenties kunnen over gerelateerde nummers gaan) telt niet mee; een
+// nieuwe distributeur is één regel in onderstaande lijst.
+const EXTRA_TRACKERS = [
+  ["Rocky Linux", /^https?:\/\/sig-security\.rocky\.page\/issues\/(CVE-\d{4}-\d{4,})\/?$/i],
+  ["Arch Linux", /^https?:\/\/security\.archlinux\.org\/(CVE-\d{4}-\d{4,})$/i],
+];
+
+function isExtraTrackerUrl(url) {
+  return EXTRA_TRACKERS.some(([, re]) => re.test(String(url || "")));
+}
+
+// De extra links per CVE: "Naam URL" per gevonden tracker, dedup per naam,
+// in de volgorde van de referenties; puur op de eigen CVE-referenties.
+function extraTrackers(cve) {
+  const out = [];
+  const gezien = new Set();
+  for (const r of cve.references || []) {
+    for (const [naam, re] of EXTRA_TRACKERS) {
+      const m = re.exec(String(r.url || ""));
+      if (m && m[1].toUpperCase() === cve.id && !gezien.has(naam)) {
+        gezien.add(naam);
+        out.push(`${naam} ${r.url}`);
+      }
+    }
+  }
+  return out;
+}
+
 // Eén regel per CVE (max 3: daarboven wordt de blok langer dan hij nuttig
-// is). CVE's zonder opgehaalde gegevens overslaan: een trackerlink bij een
-// nummer waarvan de gegevens ontbreken, is raden.
+// is): eerst de vaste zeven links, daarna de eventuele extra's uit de
+// referenties. CVE's zonder opgehaalde gegevens overslaan: een trackerlink
+// bij een nummer waarvan de gegevens ontbreken, is raden.
 function distributeurRegels(list) {
   return list
     .filter((c) => !c._fetchFailed)
     .slice(0, 3)
-    .map((c) => `- ${c.id}: ${DISTRIBUTEUR_TRACKERS.map(
-      ([naam, fn]) => `${naam} ${fn(c.id)}`).join(" \u00b7 ")}`);
+    .map((c) => `- ${c.id}: ${[
+      ...DISTRIBUTEUR_TRACKERS.map(([naam, fn]) => `${naam} ${fn(c.id)}`),
+      ...extraTrackers(c),
+    ].join(" \u00b7 ")}`);
 }
 
 // ---------- Fetching ----------
@@ -1073,10 +1584,14 @@ async function fetchNvd(cveId) {
 // Developers - Vulnerability API). Het chunkplafond van de aanroeper is
 // lager: elke CVE-record is tienduizenden tekens en één respons moet binnen
 // de harde timeout van 30 s passen. Wat NVD niet teruggeeft, ontbreekt in
-// de Map; één onbekend nummer kan bovendien de hele bundelrespons laten
-// mislukken. De aanroeper (generateUitvoeren) valt in beide gevallen terug
-// op fetchCve per nummer, dus de uitvalafhandeling (CVE Program-backstop,
-// "niet gevonden") is identiek aan toen.
+// de Map; de aanroeper (generateUitvoeren) valt daarop terug op fetchCve
+// per nummer, dus de uitvalafhandeling (CVE Program-backstop, "niet
+// gevonden") is identiek aan de route van toen. Het bundelgedrag bij
+// onbekende nummers is live geverifieerd (25-11-2026): een chunk met één
+// onbekend nummer ernaast geeft 200 met uitsluitend de gevonden nummers —
+// één typo laat de hele bundel dus niet falen, alleen dat ene nummer
+// betaalt de terugval — en een chunk met uitsluitend onbekende nummers
+// geeft 200 met een lege vulnerabilities-lijst.
 const NVD_BATCH_MAX = 20;
 
 async function fetchNvdBatch(cveIds) {
@@ -1161,7 +1676,7 @@ async function fetchCve(cveId) {
     cve = await fetchNvd(cveId);
     cve._source = "NVD";
   } catch (e) {
-    setStatus(`${cveId}: NVD niet bereikbaar/gevonden (${e.message}) — CVE Program API proberen...`);
+    statusT("status.nvd-poging", { id: cveId, reden: e.message });
     cve = await fetchCveProgram(cveId);
   }
   // Alleen succesvolle ritten cachen; een _cached-vlag van een eerdere
@@ -1223,7 +1738,7 @@ function stroomWaarschuwing() {
   const url = stroomUrlUitVeld();
   if (!url || stroomUrlToegestaan(url)) return null;
   const schema = url.match(/^([A-Za-z][A-Za-z0-9+.-]*:)/)[1];
-  return `Stroomschema-URL geweigerd (${schema}) — alleen http(s), relatief of data:image toegestaan: ${url}`;
+  return T("stroom.geweigerd", { schema, url });
 }
 
 // De weigering is een toestand, geen eenmalige gebeurtenis: zolang het veld
@@ -1241,11 +1756,10 @@ function toonStroomStatus() {
   }
   if (!stroomMeldingActief) return;
   stroomMeldingActief = false;
-  if (stroomInput.value.trim())
-    setStatus("Stroomschema-URL weer geaccepteerd; het beeld staat weer in de advisory.");
+  if (stroomInput.value.trim()) statusT("stroom.hersteld");
 }
 
-// ---------- Markdown generation (advisory template, NS CERT-briefstijl) ----------
+// ---------- Markdown generation (advisory template, CERT-briefstijl) ----------
 
 function buildMarkdown() {
   const first = advisories[0];
@@ -1550,7 +2064,7 @@ if (regenBtn) {
   regenBtn.addEventListener("click", () => {
     manualEdits = false;
     refreshOutput();
-    if (advisories.length) setStatus("Advisory opnieuw gegenereerd uit de velden.");
+    if (advisories.length) statusT("status.opnieuw");
   });
 }
 
@@ -1567,10 +2081,14 @@ const HISTORY_KEY = "advisory-writer:history-v1";
 const HISTORY_MAX = 8;
 
 // Snapshot van de briefvelden: de content van de brief, zonder
-// browservoorkeuren (API-sleutel, "Vers ophalen", "PDF via printdialoog") en
-// zonder het CVE-veld (dat apart als cves-lijst meegaat).
+// browservoorkeuren (API-sleutel, "Vers ophalen", "PDF via printdialoog" en
+// de beschrijvingstaal — die laatste is een weergavekeuze die bij herstel
+// juist NIET mee mag met een oud moment, temeer omdat de kaarten bij herstel
+// vóór applyFields worden getekend) en zonder het CVE-veld (dat apart als
+// cves-lijst meegaat).
 const HISTORY_FIELD_IDS = MEMORIZED_FIELDS.filter(
-  (id) => id !== "nvd-apikey" && id !== "no-cache" && id !== "pdf-print" && id !== "cve-input"
+  (id) => id !== "nvd-apikey" && id !== "no-cache" && id !== "pdf-print"
+    && id !== "taal-select" && id !== "ui-taal" && id !== "cve-input"
 );
 
 function captureFields() {
@@ -1637,7 +2155,7 @@ function historyPush() {
 // bewaart geen kindopties, dus via renderHistory is de tekst niet te zien).
 function geschiedenisOptieTekst(e) {
   const wat = e.ref || (e.cves && e.cves[0]) || "advisory";
-  return `${e.naam ? `${e.naam} \u00b7 ` : ""}${e.label} \u2014 ${wat}${e.manual ? " (handmatig)" : ""}`;
+  return `${e.naam ? `${e.naam} \u00b7 ` : ""}${e.label} \u2014 ${wat}${e.manual ? ` ${T("hist.handmatig")}` : ""}`;
 }
 
 function renderHistory() {
@@ -1646,7 +2164,7 @@ function renderHistory() {
   historySelect.innerHTML = "";
   const ph = document.createElement("option");
   ph.value = "";
-  ph.textContent = list.length ? "—" : "(leeg)";
+  ph.textContent = list.length ? "—" : T("hist.leeg");
   historySelect.appendChild(ph);
   for (const e of list) {
     const o = document.createElement("option");
@@ -1700,7 +2218,7 @@ function historyRestore(key) {
   // Dropdown en labelveld synchroniseren: de select staat nu op dit item,
   // dus het labelveld moet diens naam tonen (renderHistory behoudt de keuze).
   renderHistory();
-  setStatus(`Advisory uit geschiedenis (${e.naam ? `${e.naam}, ` : ""}${e.label}) hersteld, inclusief de veldwaarden van dat moment. Klik op \u201cOphalen & genereren\u201d voor actuele gegevens.`);
+  statusT("hist.hersteld", { wie: e.naam ? `${e.naam}, ` : "", label: e.label });
 }
 
 // Eigen naam voor een geschiedenisregel: de tijdstempel blijft, de naam gaat
@@ -1762,7 +2280,7 @@ function restoreState() {
   outputPanel.classList.remove("hidden");
   copyBtn.disabled = downloadBtn.disabled = pdfBtn.disabled = false;
   if (pdfOpmaakBtn) pdfOpmaakBtn.disabled = false;
-  setStatus("Laatste resultaat hersteld uit deze browser. Klik op \u201cOphalen \u0026 genereren\u201d voor actuele data.");
+  statusT("state.hersteld");
   // KEV en EPSS op de achtergrond bijladen als die gegevens ontbreken
   // (dezelfde route als in generate()). Twee losse .then-callbacks bouwden
   // de advisory hier twee keer na elkaar herbouwen; gebundeld in één
@@ -1797,8 +2315,8 @@ function renderCveCards() {
       const card = document.createElement("div");
       card.className = "cve-card";
       card.innerHTML = `
-        <h3>${c.id} <span class="badge unknown">Geen gegevens</span></h3>
-        <div class="warn">Gegevens konden niet worden opgehaald (NVD en CVE Program API niet bereikbaar of onbekend nummer). Controleer het nummer en klik nogmaals op \u201cOphalen \u0026 genereren\u201d.</div>`;
+        <h3>${c.id} <span class="badge unknown">${T("kaart.geen-gegevens")}</span></h3>
+        <div class="warn">${T("kaart.mislukt")}</div>`;
       cveCards.appendChild(card);
       continue;
     }
@@ -1810,24 +2328,24 @@ function renderCveCards() {
     const older = !v4 && !v31 ? v30 || v20 : null; // oudere CVE: alleen v3.0/v2.0
     const cvssBox = (label, mm) => {
       if (!mm || mm.score == null) {
-        return `<div class="cvss-box"><span class="label">${label}</span><div class="na">Niet beschikbaar</div></div>`;
+        return `<div class="cvss-box"><span class="label">${label}</span><div class="na">${T("kaart.niet-beschikbaar")}</div></div>`;
       }
       const mb = mapSeverity(mm.severity);
       return `<div class="cvss-box"><span class="label">${label}</span>` +
-        `<div><span class="badge ${mb.badge}">${mb.prioriteit} ${mm.score}</span>` +
+        `<div><span class="badge ${mb.badge}">${ernstLabel(mm.severity)} ${mm.score}</span>` +
         `${mm.type ? ` <span class="badge unknown">${mm.type}</span>` : ""}</div>` +
         `${mm.vector ? `<code class="vector">${mm.vector}</code>` : ""}</div>`;
     };
     const status = cveStatus(c);
     const info = kevInfo(c);
     const ssvc = parseSsvc(c);
-    let kevBadge = `<span class="badge unknown">KEV-status onbekend</span>`;
+    let kevBadge = `<span class="badge unknown">${T("kaart.kev-onbekend")}</span>`;
     if (info) {
       kevBadge = info.actief
-        ? `<span class="badge critical">KEV: actief misbruik${info.sinds ? " sinds " + (nlDate(info.sinds) || info.sinds) : ""}</span>`
+        ? `<span class="badge critical">${T("kaart.kev-actief")}${info.sinds ? ` ${T("kaart.sinds")} ${nlDate(info.sinds) || info.sinds}` : ""}</span>`
         : info.poc
-          ? `<span class="badge medium">Exploit (PoC) beschikbaar</span>`
-          : `<span class="badge low">KEV: geen actief misbruik</span>`;
+          ? `<span class="badge medium">${T("kaart.poc")}</span>`
+          : `<span class="badge low">${T("kaart.kev-geen")}</span>`;
     }
     const ssvcBadge = ssvc
       ? ` <span class="badge unknown" title="SSVC (CISA): exploitatie / automatability / technische impact">SSVC: ${escHtml([ssvc.exploitatie, ssvc.automatable, ssvc.technicalImpact].map((x) => x || "?").join(" / "))}</span>`
@@ -1843,15 +2361,15 @@ function renderCveCards() {
     card.innerHTML = `
       <h3>${c.id} <span class="badge ${m.badge}">${s.severity}${s.score != null ? " " + s.score : ""}</span>
         <span class="badge unknown">${c._source || "NVD"}</span>${kevBadge}${ssvcBadge}${epssBadge}${status ? ` <span class="badge medium">${status.label}</span>` : ""}</h3>
-      <textarea class="desc-edit" rows="3" spellcheck="false" aria-label="Beschrijving van ${c.id}, bewerkbaar" title="Bewerkbaar: wijzigingen komen direct in de advisory">${escHtml(bestDescription(c))}</textarea>
+      <textarea class="desc-edit" rows="3" spellcheck="false" aria-label="${T("kaart.desc-label", { id: c.id })}" title="${T("kaart.desc-title")}">${escHtml(bestDescription(c))}</textarea>
       <div class="cvss-boxes">${cvssBox("CVSS v4.0", v4)}${cvssBox("CVSS v3.1", v31)}${older ? cvssBox("CVSS " + older.version, older) : ""}</div>
       <div class="meta-grid">
-        <div><b>Publicatie:</b> ${c.published ? new Date(c.published).toLocaleDateString("nl-NL") : "?"}</div>
+        <div><b>${T("kaart.publicatie")}</b> ${c.published ? new Date(c.published).toLocaleDateString("nl-NL") : "?"}</div>
         <div><b>CWE:</b> ${cwes.join(", ") || "?"}</div>
       </div>
-      <div class="meta-grid"><div><b>Producten:</b> ${products.map(escHtml).join(", ") || "(geen productdata — controleer distributeur)"}</div></div>
+      <div class="meta-grid"><div><b>${T("kaart.producten")}</b> ${products.map(escHtml).join(", ") || T("kaart.geen-producten")}</div></div>
       ${status ? `<div class="warn">${status.note}</div>` : ""}
-      ${c._source === "CVE Program API" ? '<div class="warn">NVD niet bereikbaar/gegevens onvolledig: data afkomstig van de CVE Program API (door de CNA aangeleverd).</div>' : ""}
+      ${c._source === "CVE Program API" ? `<div class="warn">${T("kaart.cveprog")}</div>` : ""}
     `;
     card.querySelector(".desc-edit").addEventListener("input", (e) => {
       c._descEdit = e.target.value;
@@ -1863,6 +2381,63 @@ function renderCveCards() {
 
 // ---------- Main flow ----------
 
+// Retry-knop na uitval (optie 7): na een beurt met ten minste één zachte
+// uitval (mislukte CVE-nummers, KEV- of EPSS-uitval, geweigerd stroomschema)
+// verschijnt de knop onder de statusbalk. Hij draait een volledige nieuwe
+// generatie: geslaagde nummers komen uit de CVE-cache van een uur, dus alleen
+// de uitvallen gaan opnieuw het netwerk op - en een expliciete klik heft de
+// KEV/EPSS-afkoelperiode op, want de gebruiker oordeelt zelf dat een storing
+// voorbij is in plaats van vijf minuten te wachten. Bij een volledig
+// geslaagde beurt verdwijnt de knop weer; hij weerspiegelt steeds de uitkomst
+// van de LAATSTE generatiebeurt (herstel vanuit de geschiedenis laat hem
+// daarom intact). De whereheid van de knop wordt bijgehouden in
+// retryKnopVisible, zodat tests en eventuele toekomstige UI-logica de toestand
+// kunnen opvragen zonder de DOM te lezen.
+let retryKnopVisible = false;
+function toonRetryKnop(toon) {
+  retryKnopVisible = toon;
+  if (!retryBtn) return;
+  retryBtn.classList[toon ? "remove" : "add"]("hidden");
+}
+
+// Taalkeuze (optie 2): bij een andere voorkeur moeten de kaarten mee — hun
+// beschrijvingsteksten zijn bij het renderen met de vorige taal ingevuld.
+// Opslaan en advisory-herbouw doet het veldgeheugen al (taal-select staat in
+// MEMORIZED_FIELDS: change → saveField + queueRefresh); dit is alleen de
+// kaartverversing erbij.
+if (taalSelect) {
+  taalSelect.addEventListener("change", () => {
+    if (advisories.length) renderCveCards();
+  });
+}
+
+// Interface-taal (optie 2, volledig): statieveel, kaarten, geschiedenis en
+// de statusregel gaan direct mee naar de nieuwe taal. Het veld onthouden
+// doet het veldgeheugen al (ui-taal staat in MEMORIZED_FIELDS).
+if (uiTaalSelect) {
+  uiTaalSelect.addEventListener("change", () => {
+    vertaalUi();
+    if (advisories.length) renderCveCards();
+    renderHistory();
+    herhaalStatus();
+  });
+}
+
+if (retryBtn) {
+  retryBtn.addEventListener("click", () => {
+    // Expliciet proberen = de gebruiker vindt de storing voorbij: de
+    // afkoelperiodes van KEV en EPSS worden gereset, anders slaan
+    // loadKev/laadEpss de poging binnen de vijf minuten over en is de
+    // knop een lege belofte. Mislukte nummers staan per definitie niet in
+    // de CVE-cache (alleen successen worden gecachet), dus die gaan hoe dan
+    // ook opnieuw het netwerk op. De return maakt de handler afwachtbaar
+    // (de tests sluiten erop aan).
+    if (kevFailed) { kevFailed = false; kevFailedAt = 0; }
+    if (epssFailed) { epssFailed = false; epssFailedAt = 0; }
+    return generate();
+  });
+}
+
 async function generate() {
   const ids = parseCveList(cveInput.value);
   const genegeerd = discardedCveTokens(cveInput.value);
@@ -1870,8 +2445,8 @@ async function generate() {
     // Bij een volledig ongeldige lijst is de herkenningshint extra nuttig:
     // bij typos als 2026-99999 staat meteen in de melding wat er niet werd
     // herkend, in plaats van alleen de standaardtekst.
-    setStatus(`Voer minstens één geldig CVE-nummer in (formaat CVE-2026-123158).` +
-      (genegeerd.length ? ` Niet als CVE herkend: ${genegeerd.join(", ")}.` : ""), true);
+    setStatus(T("gen.ongeldig") +
+      (genegeerd.length ? T("gen.niet-herkend", { lijst: genegeerd.join(", ") }) : ""), true);
     return;
   }
 
@@ -1896,7 +2471,8 @@ async function generate() {
     // opgevangen en worden stubs). Zonder deze catch zou de rejection alleen
     // in de console verschijnen terwijl de statusbalk op "Ophalen..." staat.
     console.error("Advisory Writer: onverwachte fout tijdens genereren", e);
-    setStatus(`Genereren mislukt door een onverwachte fout: ${e.message}.`, true);
+    statusT("gen.onverwacht", { reden: e.message }, true);
+    toonRetryKnop(true); // ook een onverwachte fout mag met één klik opnieuw
   } finally {
     // Punt 4 schone run, uitgebreid door fix 2: álle vijf knoppen die
     // generate() hierboven uitschakelt worden altíjd weer bedienbaar — bij
@@ -1920,6 +2496,7 @@ async function generateUitvoeren(ids, genegeerd) {
   advisories = [];
   manualEdits = false; // verse generatie: de automatische tekst doet weer mee
   if (regenBtn) regenBtn.disabled = true;
+  toonRetryKnop(false); // knop verdwijnt tijdens de beurt; de uitkomst bepaalt of hij terugkomt
 
   await loadDisclaimer(); // opnieuw proberen, zodat een nieuw geplaatst bestand direct werkt
 
@@ -1938,8 +2515,10 @@ async function generateUitvoeren(ids, genegeerd) {
   // zodat alleen het laatste nummer zichtbaar was in plaats van de voortgang.
   let voltooid = 0;
   const uitCacheVooraf = ids.length - netIds.length;
-  const meervoud = ids.length === 1 ? "" : "'s";
-  setStatus(`Ophalen van ${ids.length} CVE${meervoud} (${netIds.length} op te halen${uitCacheVooraf ? `, ${uitCacheVooraf} uit cache` : ""})...`);
+  statusT(ids.length === 1 ? "gen.start.1" : "gen.start.n", {
+    aantal: ids.length, net: netIds.length,
+    cache: uitCacheVooraf ? T("gen.cache-uit", { n: uitCacheVooraf }) : "",
+  });
   // Gebundeld ophalen: de nummers die het netwerk opgaan, verdwijnen in
   // chunks van NVD_BATCH_MAX in één NVD-verzoek (parameter cveIds) in plaats
   // van één verzoek per nummer. Acht nummers kosten daarmee één verzoek in
@@ -1983,7 +2562,7 @@ async function generateUitvoeren(ids, genegeerd) {
       return await fetchCve(id); // ontbreekt in de bundel: route-per-nummer
     } finally {
       voltooid += 1;
-      setStatus(`Ophalen ${id} — ${voltooid}/${ids.length} voltooid...`);
+      statusT("gen.voortgang", { id, i: voltooid, n: ids.length });
     }
   }));
 
@@ -1999,8 +2578,9 @@ async function generateUitvoeren(ids, genegeerd) {
 
   if (advisories.every((c) => c._fetchFailed)) {
     advisories = [];
-    setStatus(`Ophalen mislukt voor: ${failed.join(", ")}. Controleer de nummers en/of netwerktogang.` +
-      (genegeerd.length ? ` Niet als CVE herkend: ${genegeerd.join(", ")}.` : ""), true);
+    setStatus(T("gen.mislukt", { lijst: failed.join(", ") }) +
+      (genegeerd.length ? T("gen.niet-herkend", { lijst: genegeerd.join(", ") }) : ""), true);
+    toonRetryKnop(true); // volledige mislukking: bij uitstek een-opnieuwwaardig
     return; // de finally in generate() maakt alle knoppen weer bedienbaar
   }
 
@@ -2036,18 +2616,22 @@ async function generateUitvoeren(ids, genegeerd) {
 
   const ok = advisories.filter((c) => !c._fetchFailed).length;
   const uitCache = advisories.filter((c) => c._cached).length;
-  const cacheDeel = uitCache ? `, ${uitCache} uit cache (vink "Vers ophalen" aan voor actuele data)` : "";
+  const cacheDeel = uitCache ? T("gen.cache-deel", { n: uitCache }) : "";
   const basis = failed.length
-    ? `Klaar. ${ok} CVE(s) verwerkt${cacheDeel}, ${failed.length} mislukt (${failed.join(", ")}); advisory voor zover mogelijk gegenereerd.`
-    : `Klaar. ${ok} CVE(s) verwerkt${cacheDeel} en advisory gegenereerd.`;
-  const epssDeel = epssFailed ? " EPSS niet beschikbaar (api.first.org)." : "";
+    ? T("gen.klaar-deel", { ok, cache: cacheDeel, mis: failed.length, lijst: failed.join(", ") })
+    : T("gen.klaar", { ok, cache: cacheDeel });
+  const epssDeel = epssFailed ? T("gen.epss-uit") : "";
   // Evaluatieronde punt 5: de afsluitende melding is bij een generatiebeurt
   // het tekststuk dat leesbaar achterblijft - refreshOutput erboven toonde
   // de stroomschema-weigering al direct, maar wordt hier overschreven.
   const stroomDeel = stroomWaarschuwing();
   setStatus(`${basis}${epssDeel}` + (genegeerd.length
-    ? ` Niet als CVE herkend: ${genegeerd.join(", ")}.`
+    ? T("gen.niet-herkend", { lijst: genegeerd.join(", ") })
     : "") + (stroomDeel ? ` ${stroomDeel}` : ""));
+  // Retry-knop (optie 7): alles wat in deze beurt is afgehaakt, is opnieuw
+  // op te halen: mislukte nummers (niet gecachet), KEV/EPSS (klik heft de
+  // cooldown op) en het stroomschema (veld repareren en opnieuw bouwen).
+  toonRetryKnop(failed.length > 0 || kevFailed || epssFailed || !!stroomDeel);
 }
 
 // ---------- Events ----------
@@ -2064,10 +2648,10 @@ copyBtn.addEventListener("click", async () => {
   // de PDF-routes.
   try {
     await navigator.clipboard.writeText(lastMarkdown);
-    setStatus("Markdown gekopieerd naar klembord.");
+    statusT("kopieer.gelukt");
     historyPush(); // handmatige correcties bij het kopiëren vastleggen
   } catch {
-    setStatus("Kopiëren mislukt: klembord niet beschikbaar (de app vereist https of localhost).", true);
+    statusT("kopieer.mislukt", null, true);
   }
 });
 
@@ -2086,9 +2670,9 @@ $("#share-btn").addEventListener("click", async () => {
   const url = `${basis}?cve=${encodeURIComponent(ids.join(","))}`;
   try {
     await navigator.clipboard.writeText(url);
-    setStatus(`Deellink gekopieerd: ${url}`);
+    statusT("share.gelukt", { url });
   } catch {
-    setStatus(`Deellink: ${url}`);
+    statusT("share.url", { url });
   }
 });
 
@@ -2112,13 +2696,13 @@ if (histDelBtn) {
   histDelBtn.addEventListener("click", () => {
     if (!historySelect.value) return;
     historyDelete(historySelect.value);
-    setStatus("Geschiedenisitem verwijderd.");
+    statusT("hist.verwijderd");
   });
 }
 if (histClearBtn) {
   histClearBtn.addEventListener("click", () => {
     historyClearAll();
-    setStatus("Geschiedenis gewist.");
+    statusT("hist.gewist");
   });
 }
 
@@ -2129,14 +2713,12 @@ if (histLabelInput) {
     const key = historySelect.value;
     if (!key) {
       histLabelInput.value = "";
-      setStatus("Kies eerst een geschiedenisregel: het labelveld geeft die regel een eigen naam.", true);
+      statusT("hist.kies-eerst", null, true);
       return;
     }
     const naam = historyRename(key, histLabelInput.value);
-    if (naam == null) { setStatus("Geschiedenisregel niet gevonden (intussen gewist?).", true); return; }
-    setStatus(naam
-      ? `Geschiedenisregel hernoemd naar \u201c${naam}\u201d.`
-      : "Eigen naam verwijderd; de regel toont weer alleen het tijdstempel.");
+    if (naam == null) { statusT("hist.niet-vinden", null, true); return; }
+    statusT(naam ? "hist.hernoemd" : "hist.naamloos", naam ? { naam } : null);
   });
 }
 
@@ -2326,7 +2908,7 @@ function exportPdf() {
   if (pdfRoute() === "jspdf") {
     try {
       exportPdfJsPdf();
-      setStatus("PDF gedownload als PDF-bestand (jsPDF). Voor de printdialoog met alle opmaak: vink \u201cPDF via printdialoog\u201d aan.");
+      statusT("pdf.jspdf-klaar");
       return;
     } catch (e) {
       // Bijv. een onverwacht markdown- of geheugenprobleem: de printdialoog
@@ -2336,6 +2918,56 @@ function exportPdf() {
   }
   exportPdfPrinten();
 }
+
+// --- paged.js in de printdialoog (optie 3) --------------------------------
+// De browserprintdialoog printte het document tot nu toe met de eigen
+// paginering van de browser: margeboxen (paginanummers, lopende kop) werkten
+// daar niet in Firefox, en de papiere uitkomst week per browser iets af. Met
+// de pagedjs-polyfill (CSS Paged Media in JS) paginéért de pagina ZELF het
+// document: vaste A4-pagina-elementen met de margeboxen uit PRINT_CSS erin,
+// broakbescherming op echte regelgeometrie (de 14-mm-benadering van de
+// raster-snijder is dan verleden) en een identieke uitkomst in elke browser.
+// De polyfill loadt in het print-iframe, niet op de app-pagina: hij
+// herpagineert het document waarin hij laadt, en dat moet het afdrukdocument
+// zijn met de printstijl erin. auto:false omdat de start van de paginering
+// wacht tot de afbeeldingen binnen zijn (meting vóór die tijd geeft pagina's
+// op de verkeerde plekken); de parent geeft het startschot.
+// Tekst blijft selecteerbaar — dit is HTML, geen raster.
+// SRI: pagedjs staat niet op cdnjs (zocht 27-11-2026), dus jsDelivr met de
+// sha256-integrity uit de jsDelivr-pakkette-API voor exact dit bestand.
+const PAGED_CDN_URL = "https://cdn.jsdelivr.net/npm/pagedjs@0.4.3/dist/paged.polyfill.min.js";
+const PAGED_SRI = "sha256-9E41ptUQbYGcNBX9OFkd4E04NDQ8FOUKViuEJX4gRpI=";
+// Watchdog: de paged-seinen (script klaar/mislukt) worden alleen afwacht
+// zolang de afdrukbeurt nog niet uit eigen beweging print. Een CDN die noch
+// laadt noch faalt (trage intranetproxy) mag de printdialoog niet
+// vastzetten: na deze cap gaat de dialoog open zoals voorheen, kaal.
+const PAGED_WATCHDOG_MS = 4000;
+
+// Het kopje HTML dat de polyfill en het startknopje in het printdocument
+// zet. pdfStartPaged wordt door de parent aangeroepen (na de plaatjeswacht);
+// de onload/onerror-attributen melden het script terug aan de parent via de
+// callbackvensters die exportPdfPrinten op het iframe-window zet.
+const PAGED_HTML =
+  `<script>` +
+  `window.PagedConfig = { auto: false };` +
+  `window.pdfStartPaged = function () {` +
+  `  try {` +
+  `    var p = new window.Paged.Previewer();` +
+  // Na het herpagineren worden de browsermarges op 0 gezet: de polyfill
+  // maakt pagina's van exact 210x297 mm, en de browser mag er bij het
+  // afdrukken geen eigen marges (en dus extra pagina's) omheen zetten.
+  `    p.preview().then(function () {` +
+  `      var s = document.createElement("style");` +
+  `      s.textContent = "@page { margin: 0; }";` +
+  `      document.head.appendChild(s);` +
+  `      window.pdfPagedAf();` +
+  `    }, window.pdfPagedAf);` +
+  `  } catch (e) { window.pdfPagedAf(); }` +
+  `};` +
+  `<\/script>` +
+  `<script async crossorigin="anonymous" src="${PAGED_CDN_URL}" integrity="${PAGED_SRI}"` +
+  ` onload="window.pdfPagedScriptKlaar && window.pdfPagedScriptKlaar()"` +
+  ` onerror="window.pdfPagedScriptMislukt && window.pdfPagedScriptMislukt()"><\/script>`;
 
 function exportPdfPrinten() {
   if (!lastMarkdown) return;
@@ -2381,14 +3013,51 @@ function exportPdfPrinten() {
         iframe.contentWindow.focus(); // nodig in sommige browsers
         iframe.contentWindow.print();
       } catch (e) {
-        setStatus("Printdialoog kon niet worden geopend; gebruik de browserprint (Ctrl/Cmd+P).", true);
+        statusT("pdf.print-open-fout", null, true);
         cleanup(); // print ging niet open: geen afterprint om op te wachten
       }
     }, 250); // korte vertraging zodat styling is toegepast
   };
+  // paged-machine (optie 3): de print gaat pas af als ZOWEL de
+  // plaatjeswacht als het paged-script zich hebben gemeld. Het script kan
+  // twee kanten op eerder klaar zijn dan de plaatjes of later; beide
+  // volgorde-folden hier samen in pagedProbeer. Een gemeld maar afwezig
+  // Paged-object (SRI-verwerpeling zonder error-event) telt als kaal.
+  const w = iframe.contentWindow;
+  let plaatjesKlaar = false;
+  let pagedGemeld = false; // script heeft zich gemeld (klaar óf mislukt)
+  let pagedModus = "kaal"; // "paged" als de polyfill er werkelijk is
+  let pagedGestart = false;
+  const pagedProbeer = () => {
+    if (afgedrukt || !plaatjesKlaar || !pagedGemeld) return;
+    if (pagedModus === "paged" && typeof w.pdfStartPaged === "function") {
+      if (pagedGestart) return;
+      pagedGestart = true;
+      clearTimeout(pagedWatchdog); // paginering loopt: die mag duren
+      try { w.pdfStartPaged(); } catch { printNu(); } // pdfPagedAf print daarna
+      return;
+    }
+    printNu(); // kaal: de browser paginéért zelf, zoals altijd
+  };
+  w.pdfPagedScriptKlaar = () => {
+    if (!pagedGemeld) { pagedGemeld = true; pagedModus = w.Paged ? "paged" : "kaal"; }
+    pagedProbeer();
+  };
+  w.pdfPagedScriptMislukt = () => {
+    if (!pagedGemeld) { pagedGemeld = true; pagedModus = "kaal"; }
+    pagedProbeer();
+  };
+  w.pdfPagedAf = () => printNu(); // na de paginering (succes of fout) printen
+  // Vangnet: een CDN die zich noch meldt noch faalt (trage proxy), mag de
+  // dialoog niet vastzetten. De watchdog dekt alleen de scriptfase; zodra
+  // de paginering zelf loopt, is die overbodig en wordt hij afgelast (die
+  // kan bij een lange advisory gerust langer dan de cap duren).
+  const pagedWatchdog = setTimeout(printNu, PAGED_WATCHDOG_MS);
   // onload VÓÓR het schrijven toewijzen: bij document.write/close kan het
   // load-event al vóór de toewijzing afvuren, waardoor print() nooit draaide.
-  iframe.onload = () => { wachtOpPlaatjes(doc).then(printNu); };
+  iframe.onload = () => {
+    wachtOpPlaatjes(doc).then(() => { plaatjesKlaar = true; pagedProbeer(); });
+  };
   doc.open();
   // Lopende kop op elke printpagina: advisorynummer/titel via een margebox,
   // zodat pagina 2 en verder herleidbaar blijven. Striping (CSS-content-
@@ -2399,10 +3068,11 @@ function exportPdfPrinten() {
     `<!DOCTYPE html><html lang="nl"><head><meta charset="utf-8"><title>${docTitle}</title>` +
     `<style>${PRINT_CSS}</style>` +
     `<style>@page { @top-center { content: "${koptekst}"; font-size: 8.5pt; color: #777; } }</style>` +
+    PAGED_HTML + // paged.js-polyfill + startknopje (zie PAGED_HTML hierboven)
     `</head><body>${previewEl.innerHTML}</body></html>`
   );
   doc.close();
-  setStatus("Printdialoog geopend — kies daar \u201cOpslaan als PDF\u201d / \u201cSave as PDF\u201d.");
+  statusT("pdf.print-geopend");
 }
 
 // --- html2canvas: PDF "met opmaak" (tweede externe bron) ------------------
@@ -2422,11 +3092,11 @@ function html2canvasKlaar() {
 async function exportPdfMetOpmaak() {
   if (!lastMarkdown) return;
   if (!html2canvasKlaar() || !window.jspdf || !window.jspdf.jsPDF) {
-    setStatus("html2canvas en/of jsPDF niet geladen (CDN traag of geblokkeerd); printdialoog als terugval.");
+    statusT("pdf.h2c-ontbreekt");
     exportPdfPrinten();
     return;
   }
-  setStatus("PDF met opmaak samenstellen (preview fotograferen)...");
+  statusT("pdf.h2c-run");
   try {
     // Verborgen kopie van de preview op vaste breedte fotograferen
     // (174 mm ≈ 658 px bij 96 dpi, dezelfde marges als de jsPDF-tekstroute),
@@ -2513,12 +3183,12 @@ async function exportPdfMetOpmaak() {
       doc.text(`${i} / ${nPages}`, 105, 290, { align: "center" });
     }
     doc.save(`${(refInput.value.trim() || "advisory").replace(/[^\w-]/g, "_")}-opmaak.pdf`);
-    setStatus("PDF met opmaak gedownload (raster: tekst is niet selecteerbaar).");
+    statusT("pdf.h2c-klaar");
   } catch (e) {
     // Meestal een door CORS geblokkeerd extern plaatje in de preview of een
     // html2canvas-interne fout; de printdialoog kan in beide gevallen altijd.
     console.error("Advisory Writer: html2canvas-export mislukt; printdialoog als terugval", e);
-    setStatus("html2canvas-export mislukt; printdialoog als terugval.");
+    statusT("pdf.h2c-fout");
     exportPdfPrinten();
   }
 }
@@ -2558,6 +3228,7 @@ $("#tab-raw").addEventListener("click", () => {
 // defaults: eerst opgeslagen velden herstellen, daarna alleen nog lege
 // velden voorzien van een automatische standaardwaarde.
 initFieldMemory();
+vertaalUi(); // bediening in de (herstelde of automatische) interface-taal
 const urlCve = new URLSearchParams(location.search).get("cve");
 if (urlCve) {
   // Via de deellink geplakte rommel (puntjes, losse komma's) netjes opschonen;

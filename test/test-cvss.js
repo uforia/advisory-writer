@@ -1,6 +1,7 @@
 /* Test harness: verifies CVSS-parsing tegen echte NVD API 2.0 payloadvormen.
-   Run: node test/test-cvss.js  (offline — payloads ingebed) */
+   Run: npm test   of   node --test test/   (offline — payloads ingebed) */
 "use strict";
+const { test: tapTest } = require("node:test");
 
 // ---- copy of the logic in app.js (kept in sync) ----
 function collectCvss(cve) {
@@ -70,11 +71,11 @@ function normalizeCnaMetrics(cna) {
 }
 
 // ---- test cases (real payload shapes) ----
-let pass = 0, fail = 0;
+// Cases verzamelen en als TAP-subtests registreren in de module-export;
+// de vergelijking blijft JSON-gelijkheid zoals de suite altijd deed.
+const cases = [];
 function check(name, actual, expected) {
-  const ok = JSON.stringify(actual) === JSON.stringify(expected);
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  ->  ${JSON.stringify(actual)}${ok ? "" : "  (verwacht: " + JSON.stringify(expected) + ")"}`);
-  ok ? pass++ : fail++;
+  cases.push({ name, actual, expected });
 }
 
 // 1. CVE-2026-99999 (live NVD payload): only a *Secondary* (CNA) metric,
@@ -141,5 +142,14 @@ check("cvssByFamily: per familie Primary boven Secondary",
   [[fam2.v4.score, fam2.v4.type], [fam2.v31.score, fam2.v31.type]],
   [[6.0, "Secondary"], [8.1, "Primary"]]);
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (typeof process !== "undefined") process.exit(fail ? 1 : 0);
+// ---- registratie bij node:test: één test per case ----
+// Dit bestand is volledig synchroon, dus alle cases zijn al bekend vóórdat
+// het bestand is uitgelopen; directe registratie volstaat (de runner leest
+// de registraties na afloop van het inladen van het bestand).
+for (const c of cases) {
+  tapTest(c.name, () => {
+    const a = JSON.stringify(c.actual);
+    const e = JSON.stringify(c.expected);
+    if (a !== e) throw new Error(`verwacht ${e}, gekregen ${a}`);
+  });
+}

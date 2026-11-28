@@ -23,7 +23,9 @@
    heeft geen inline style meer), plus de EPSS-exploitkans (respons-
    parsing, gebundelde en gecachete ophaal, "niet in model"-ontlasting,
    regeltekst met Nederlandse komma en weglaten bij mislukte ritten), de
-   distributeurtrackers (URL-vormen, skip/cap en het blok in de advisory) en
+   distributeurtrackers (URL-vormen van de zevendelige vaste set incl.
+   Alpine, skip/cap, extra-trackers uit de NVD-referenties en het blok in
+   de advisory) en
    de jsPDF-export (markdown-regelconverter, routeknop jsPDF/printdialoog
    incl. vink en ontbrekende CDN, CDN-script volgorde, de async-lading en de
    SRI-pin van het CDN-script, en het vink buiten het geschiednissnapshot),
@@ -95,13 +97,37 @@
    generatiemelding, met één keer een herstelbevestiging), plus de
    deellink-basis op file:// (origin "null" geeft geen null/-voorvoegsel
    meer, oude query en hash vallen weg; op http(s) blijft de vorm exact
-   zoals voorheen — dynamisch getest via de geregistreerde klikhandler).
-   Run: node test/test-ui.js   (vanuit de projectmap) */
+   zoals voorheen — dynamisch getest via de geregistreerde klikhandler),
+   plus de retry-knop na uitval (knop verschijnt na een beurt met KEV-uitval,
+   gewone generatie respecteert de cooldown, de klik heft haar op en hergebruikt
+   de CVE-cache, en een geslaagde beurt verbergt de knop weer — dynamisch
+   getest via de klikhandler en de classLog van de knop-stub), plus de
+   distributeurtrackers-uitbreiding (Alpine als zevende vaste link, extra
+   per-CVE-links uit de NVD-referenties met dedup en vreemd-CVE-filter, en
+   compactiebehoud — sectie 40) en paged.js in de printdialoog (polyfill met
+   sha256-SRI in het printdocument, pagineren vóór het printen, kaal printen
+   bij een ontbrekend of verworpen Paged-object, volgorde-onafhankelijke seinen,
+   watchdog bij een CDN die niets meldt, en de bedradingschecks — sectie 41)
+   en de beschrijvingstaal (keuze NL/EN/auto, valroute naar Engels en de
+   eerste beschrijving, handmatige voorrang, compactiebehoud van het
+   taalkeuze-exemplaar en de HTML-/veldgeheugenbedrading — sectie 42) en
+   de volledige interfacetaal (woordenboek NL/EN, veld #ui-taal met
+   browsertaalspoor, statieveelvertaling, statusmeldingen op
+   woordenboeksleutel die bij een wissel meekrijgen, en kaarten en
+   geschiedenis in de gekozen taal — sectie 43).
+   Run: npm test   of   node --test test/   (vanuit de projectmap) */
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+// node:test: de suite verzamelt zijn cases nog zoals altijd via check();
+// na afloop registreert de module-export elke case als TAP-subtest, zodat
+// `node --test` per case een ok/not ok-regel en de expected/actual-diff
+// toont. De naam `test` wordt tapTest genoemd omdat in deze suite
+// overal regex-.test()-aanroepen staan (method calls, geen botsing, maar
+// dit maakt het verschil expliciet).
+const { test: tapTest } = require("node:test");
 
 // ---- minimale browser-stub zodat app.js ladingsgewijs meedraait ----
 const noop = () => {};
@@ -160,6 +186,10 @@ const cachedStub = (key) => {
   if (!elCache.has(key)) { const el = stubEl(); el.id = key.replace(/^#/, ""); elCache.set(key, el); }
   return elCache.get(key);
 };
+// Openstaande app-timers (via de wrapper hieronder) worden bijgehouden
+// zodat de ouder-test aan het eind van de suite wat nog in de event loop
+// staat kan wegruimen; zie de toelichting bij de sandbox.
+const sandboxOpenTimers = new Set();
 const sandbox = {
   document: {
     querySelector: (sel) => cachedStub(sel),
@@ -178,6 +208,10 @@ const sandbox = {
       return el;
     },
     body: cachedStub("#body"),
+    // stubben voor vertaalUi(): de document-stub vertaalt niets (lege
+    // lijst) en de html-taal staat in documentElement (sectie 43)
+    querySelectorAll: () => [],
+    documentElement: { lang: "nl" },
   },
   localStorage: mkStorage(),
   sessionStorage: mkStorage(),
@@ -187,7 +221,22 @@ const sandbox = {
   fetch: async () => { throw new Error("geen netwerk in test"); },
   confirm: () => false,
   Blob: class {},
-  setTimeout, clearTimeout, console,
+  console,
+  // Geteelde setTimeout/clearTimeout: de app plant timers die de suite
+  // overleven - de printdialoog heeft bijvoorbeeld een opruimtimer van
+  // 120 s. Die houden de event loop twee minuten live ná de laatste
+  // check; de Node-testrunner merkt zo'n nazwemmer aan met "Promise
+  // resolution is still pending but the event loop has already resolved".
+  // De wrappers houden openstaande ids bij; de ouder-test ruimt ze na de
+  // laatste check op, zodat het proces meteen kan afsluiten. Suite-eigen
+  // wachttijden (sectie 27) gebruiken de echte setTimeout van deze module
+  // en staan hier buiten schot.
+  setTimeout: (fn, ms, ...args) => {
+    const id = setTimeout(() => { sandboxOpenTimers.delete(id); fn(...args); }, ms);
+    sandboxOpenTimers.add(id);
+    return id;
+  },
+  clearTimeout: (id) => { if (id) sandboxOpenTimers.delete(id); clearTimeout(id); },
 };
 const src = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
 const context = vm.createContext(sandbox);
@@ -201,9 +250,11 @@ vm.runInContext(
   " buildMarkdown, groepeerReferenties, compactAdvisory, fetchCve, fetchNvdBatch, NVD_BATCH_MAX, clearCveCache, netIndexen," +
   " historyPush, historyRead, historyRestore, historyDelete, historyClearAll, historyRename," +
   " geschiedenisOptieTekst, generate, mdToHtml," +
-  " epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels, loadKev," +
+  " epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels," +
+  " extraTrackers, isExtraTrackerUrl, loadKev, taalVoorkeur, kiesBeschrijving," +
   " pdfRegels, pdfRoute, pdfKoptekst, exportPdfJsPdf, captureFields," +
   " stroomRegelTekst, stroomWaarschuwing, toonStroomStatus, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten, setStatus," +
+  " uiTaal, T, vertaalUi, statusT, herhaalStatus, renderCveCards, ernstLabel," +
   " setKevMap: (m) => { kevMap = m; }," +
   // Testhaken om de afkoelperiodes na een uitval (punt 4) kunstmatig te
   // laten verlopen: de tijdstempels op 0 zetten doet de cooldown als
@@ -224,17 +275,28 @@ const {
   groepeerReferenties, compactAdvisory, fetchCve, fetchNvdBatch, NVD_BATCH_MAX, clearCveCache, netIndexen,
   historyPush, historyRead, historyRestore, historyDelete, historyClearAll, historyRename,
   geschiedenisOptieTekst, generate, mdToHtml,
-  epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels, loadKev,
+  epssUitRespons, laadEpss, clearEpssCache, epssInfo, epssRegelTekst, distributeurRegels,
+  extraTrackers, isExtraTrackerUrl, loadKev, taalVoorkeur, kiesBeschrijving,
   pdfRegels, pdfRoute, pdfKoptekst, exportPdfJsPdf, captureFields,
   stroomRegelTekst, stroomWaarschuwing, toonStroomStatus, html2canvasKlaar, exportPdfMetOpmaak, exportPdfPrinten, setStatus,
+  uiTaal, T, vertaalUi, statusT, herhaalStatus, renderCveCards, ernstLabel,
   setKevMap, kevKoelUit, epssKoelUit, kevState, resetKevState, setAdvisories, getAdvisories, setLastMarkdown,
 } = sandbox.__api;
 
-let pass = 0, fail = 0;
+// Cases worden verzameld en pas na afloop (in de module-export) als
+// subtests geregistreerd; de vergelijking blijft JSON-gelijkheid zoals de
+// suite altijd deed, dus geen enkele verwachting verandert van betekenis.
+// Let op: check() evalueert NU, op het moment van aanroepen. De
+// registratie gebeurt ná afloop van de suite, en wie dan pas vergelijkt
+// vergelijkt levende referenties: de classLog van de retry-knop-stub
+// groeit bijvoorbeeld mee met elke latere generatiebeurt, en dan ziet
+// een check die na beurt 1 twee entries noteerde straks acht entries uit
+// vier beurten. Daarom hier vergelijken en het oordeel opslaan.
+const cases = [];
 function check(name, actual, expected) {
-  const ok = JSON.stringify(actual) === JSON.stringify(expected);
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}  ->  ${JSON.stringify(actual)}${ok ? "" : "  (verwacht: " + JSON.stringify(expected) + ")"}`);
-  ok ? pass++ : fail++;
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  cases.push({ name, ok: a === e, msg: `verwacht ${e}, gekregen ${a}` });
 }
 const m = (score, sev) => ({
   metrics: { cvssMetricV31: [{ type: "Primary", cvssData: { baseScore: score, baseSeverity: sev, vectorString: "V" } }] },
@@ -472,7 +534,7 @@ check("nvdStapMs: 8 CVE's zonder sleutel -> 6500", nvdStapMs(8, false), 6500);
 check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
 
 // ---------- 11. fetchJson en de volledige fallback-route ----------
-(async () => {
+const kantEnKlaar = (async () => {
   const origFetch = sandbox.fetch;
 
   // 429: één poging, geen zinloze retry binnen hetzelfde 30s-venster
@@ -953,9 +1015,9 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
   // CVE-nummer zoals het is, Red Hat gebruikt kleine letters, SUSE vraagt
   // om een afsluitende slash. Een distributeur die een CVE niet volgt, geeft
   // zelf een 404: dat is het antwoord van de tracker, geen kapotte link.
-  check("distributeurlinks: zes controlelinks in de geverifieerde URL-vormen",
+  check("distributeurlinks: zeven controlelinks in de geverifieerde URL-vormen",
     distributeurRegels([{ id: "CVE-2026-123158" }]),
-    ["- CVE-2026-123158: Debian https://security-tracker.debian.org/tracker/CVE-2026-123158 \u00b7 Ubuntu https://ubuntu.com/security/CVE-2026-123158 \u00b7 Red Hat https://access.redhat.com/security/cve/cve-2026-123158 \u00b7 SUSE https://www.suse.com/security/cve/CVE-2026-123158/ \u00b7 Fedora https://cve.fedoraproject.org/#/cve/CVE-2026-123158 \u00b7 Amazon Linux https://alas.aws.amazon.com/cve/html/CVE-2026-123158.html"]);
+    ["- CVE-2026-123158: Debian https://security-tracker.debian.org/tracker/CVE-2026-123158 \u00b7 Ubuntu https://ubuntu.com/security/CVE-2026-123158 \u00b7 Red Hat https://access.redhat.com/security/cve/cve-2026-123158 \u00b7 SUSE https://www.suse.com/security/cve/CVE-2026-123158/ \u00b7 Fedora https://cve.fedoraproject.org/#/cve/CVE-2026-123158 \u00b7 Amazon Linux https://alas.aws.amazon.com/cve/html/CVE-2026-123158.html · Alpine https://security.alpinelinux.org/vuln/CVE-2026-123158"]);
   // De twee nieuwsten van de uitbreidingsronde apart bewaakt: juist hun
   // vormen wijken het meest af van de vier bestaande (hash-route van de
   // Fedora-CVE-website resp. .html-achtervoegsel bij ALAS). In de grote
@@ -1404,9 +1466,15 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     return el;
   };
   setLastMarkdown("printtest");
+  // Sinds paged.js (optie 3) printt de dialoog pas als ZOWEL de plaatjeswacht
+  // als het paged-script zich heeft gemeld. Deze sectie test de plaatjeswacht
+  // zelf en simuleert daarom het goedkoopste paged-sein: het onerror-pad
+  // (CDN afwezig) → kaal printen, precies het oude gedrag. Sectie 41 test de
+  // paged-route zelf.
   const imgTrage = { complete: false, listeners: {}, addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); } };
   const elTrage = mkPrintEnv([imgTrage]);
   exportPdfPrinten();
+  elTrage.contentWindow.pdfPagedScriptMislukt(); // CDN afwezig: kaal printen
   elTrage.onload();
   await new Promise((r) => setTimeout(r, 320)); // 250 ms printvertraging was geweest
   const printsVoorLoad = elTrage.contentWindow.prints.length;
@@ -1416,12 +1484,14 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     [printsVoorLoad, elTrage.contentWindow.prints.length], [0, 1]);
   const elCompleet = mkPrintEnv([{ complete: true }]);
   exportPdfPrinten();
+  elCompleet.contentWindow.pdfPagedScriptMislukt();
   elCompleet.onload();
   await new Promise((r) => setTimeout(r, 320));
   check("print: complete afbeeldingen laten de printdialoog direct door (alleen de stylingvertraging)",
     elCompleet.contentWindow.prints.length, 1);
   const elDubbel = mkPrintEnv([{ complete: true }]);
   exportPdfPrinten();
+  elDubbel.contentWindow.pdfPagedScriptMislukt();
   elDubbel.onload(); elDubbel.onload(); // about:blank-slag én documentload
   await new Promise((r) => setTimeout(r, 320));
   check("print: dubbel load-event drukt precies één keer af",
@@ -1429,6 +1499,7 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
   const imgKapotte = { complete: false, listeners: {}, addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); } };
   const elKapot = mkPrintEnv([imgKapotte]);
   exportPdfPrinten();
+  elKapot.contentWindow.pdfPagedScriptMislukt();
   elKapot.onload();
   imgKapotte.listeners.error.forEach((fn) => fn()); // gebroken plaatje: tóch door
   await new Promise((r) => setTimeout(r, 320));
@@ -1436,26 +1507,13 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     elKapot.contentWindow.prints.length, 1);
   const elNooit = mkPrintEnv([{ complete: false, addEventListener: noop }]);
   exportPdfPrinten();
+  elNooit.contentWindow.pdfPagedScriptMislukt();
   elNooit.onload(); // geen enkel load-/error-event: de cap van 3 s moet redden
   await new Promise((r) => setTimeout(r, 3600));
   check("print: een afbeelding die nooit laadt, houdt de printdialoog niet langer dan de cap van 3 s",
     elNooit.contentWindow.prints.length, 1);
   sandbox.document.createElement = oorsprPrint; // stub-fabriek terugzetten
   setLastMarkdown("");
-
-  // -------------------------------------------------------------------------
-  // 28. PUNT 7: kleine consistentie-afwerkingen
-  // ---------------------------------------------------------------------
-  // Drie losse puntjes uit de schone-run-analyse, elk vastgezet zodat ze
-  // niet terugsluipen: (a) elke console-fout in app.js draagt het "Advisory
-  // Writer:"-prefix dat alle andere meldingen ook dragen, (b) de bedrading
-  // van het geschiedenislabelveld is afwezigheidsbestendig als alle andere
-  // knoppen, en (c) de modeldatum uit de EPSS-respons wordt in beide
-  // responsvormen opgenomen (in de arraytak was het veld gedestructureerd
-  // en genegeerd, terwijl de objecttak het wél zette).
-
-  console.log("\n--- 28. kleine consistentie-afwerkingen ---");
-
   {
     // (a) elke console-oproep in app.js begint met het app-prefix. De teller
     // is expliciet: drie foutpaden (genereren, jsPDF, html2canvas) en die
@@ -2063,6 +2121,481 @@ check("nvdStapMs: met API-sleutel altijd 1200", nvdStapMs(8, true), 1200);
     sandbox.navigator = origNav38;
   }
 
-  console.log(`\n${pass} passed, ${fail} failed`);
-  process.exit(fail ? 1 : 0);
+  // ---------- 39. Retry-knop na uitval (optie 7) ----------
+  // Na een beurt met een zachte uitval verschijnt "Probeer opnieuw" onder de
+  // statusbalk. De knop draait een volledige generatie én heft de KEV/EPSS-
+  // cooldown op; een gewone genereerknop respecteert die cooldown juist.
+  {
+    // (a) bedrading: de knop staat in index.html en is initieel verborgen
+    check("retry: knop in index.html met title en initieel verborgen",
+      [/id="retry-btn"[^>]*class="secondary hidden"/.test(htmlSrc),
+       /title="[^"]*opnieuw[^"]*"/.test(htmlSrc.match(/id="retry-btn"[^>]*/)[0])],
+      [true, true]);
+
+    const origFetch39 = sandbox.fetch;
+    resetKevState(); clearEpssCache(); clearCveCache();
+    sandbox.sessionStorage.clear();
+    cachedStub("#stroomschema").value = "";
+    let nNvd39 = 0, nKev39 = 0, kevStaatAan39 = false;
+    sandbox.fetch = async (url) => {
+      if (url.includes("services.nvd")) {
+        nNvd39 += 1;
+        return { ok: true, json: async () => ({ vulnerabilities: [{ cve: { id: "CVE-2026-3901", descriptions: [{ lang: "en", value: "d" }] } }] }) };
+      }
+      if (url.includes("cisa.gov")) {
+        nKev39 += 1;
+        if (!kevStaatAan39) throw new Error("kev-stub uit");
+        return { ok: true, json: async () => ({ vulnerabilities: [] }) };
+      }
+      if (url.includes("api.first.org")) return { ok: true, json: async () => ({ data: [] }) };
+      return { ok: true, text: async () => "", json: async () => ({}) };
+    };
+    const retryStub = cachedStub("#retry-btn");
+    cachedStub("#cve-input").value = "CVE-2026-3901";
+
+    // beurt 1: KEV-uitval → knop verschijnt (eerst add, dan remove "hidden")
+    retryStub.classLog.length = 0;
+    await generate();
+    check("retry: KEV-uitval laat de knop na de beurt verschijnen",
+      [nKev39, kevState(), retryStub.classLog],
+      [1, { map: null, failed: true }, [["add", "hidden"], ["remove", "hidden"]]]);
+
+    // beurt 2: gewone generatie respecteert de cooldown → géén KEV-poging,
+    // en het geslaagde nummer komt uit de cache → géén nieuwe NVD-call
+    await generate();
+    check("retry: gewone generatie respecteert de cooldown en de CVE-cache",
+      [nKev39, nNvd39, retryStub.classLog.at(-1)],
+      [1, 1, ["remove", "hidden"]]);
+
+    // beurt 3: klik op retry → cooldown opgeheven, KEV probeert opnieuw
+    // (nog steeds uit), de NVD-cache blijft onaangeroerd
+    await retryStub.listeners.click[0]();
+    check("retry: klik heft de KEV-cooldown op en hergebruikt de CVE-cache",
+      [nKev39, nNvd39, retryStub.classLog.at(-1)],
+      [2, 1, ["remove", "hidden"]]);
+
+    // beurt 4: retry-klik met herstelbare KEV-feed → geen uitval meer,
+    // knop verdwijnt weer (laatste classList-op is add "hidden")
+    kevStaatAan39 = true;
+    await retryStub.listeners.click[0]();
+    check("retry: geslaagde beurt verbergt de knop weer",
+      [nKev39, kevState(), retryStub.classLog.at(-1)],
+      [3, { map: 0, failed: false }, ["add", "hidden"]]);
+
+    // (f) bedrading in de bron: toonmoment aan de uitkomst gekoppeld en de
+    // klikhandler reset de cooldown-vlaggen expliciet
+    check("bron: toonmoment en cooldown-reset in de retry-handler",
+      [/toonRetryKnop\(failed\.length > 0 \|\| kevFailed \|\| epssFailed \|\| !!stroomDeel\);/.test(src),
+       /if \(kevFailed\) \{ kevFailed = false; kevFailedAt = 0; \}/.test(src)],
+      [true, true]);
+
+    sandbox.fetch = origFetch39;
+  }
+
+  // ---------- 40. Distributeurtrackers uitgebreid (optie 4) ----------
+  // Zes werd zeven: de Alpine Security Tracker heeft wél een per-CVE-pagina
+  // (security.alpinelinux.org/vuln/<CVE>, live geverifieerd 26-11-2026 aan
+  // CVE-2024-6387: pakketstatus per branch). Daarnaast komen extra
+  // distributeurlinks (Rocky Linux, Arch Linux) uit de NVD-referenties
+  // zelf: alleen als de tracker dít nummer volgt staat de link erbij, en
+  // hij overleeft de compactie van de browseropslag.
+  {
+    const cveExtra = {
+      id: "CVE-2026-4001",
+      references: [
+        { url: "https://example.com/own" },
+        { url: "https://sig-security.rocky.page/issues/CVE-2026-4001/" },
+        { url: "https://sig-security.rocky.page/issues/CVE-2026-4001/" }, // dubbel blijft één
+        { url: "https://security.archlinux.org/CVE-2026-4001" },
+        { url: "https://sig-security.rocky.page/issues/CVE-2025-0001/" }, // ander CVE telt niet
+        { url: "https://www.openssh.com/txt/release-9.8" }, // geen trackerpatroon
+      ],
+    };
+    // (a) extraTrackers: gevonden en dedup per naam, vreemd CVE en ruis erbuiten
+    check("extra-trackers: Rocky en Arch uit de referenties, dedup en vreemd CVE buiten beschouwing",
+      extraTrackers(cveExtra),
+      ["Rocky Linux https://sig-security.rocky.page/issues/CVE-2026-4001/",
+       "Arch Linux https://security.archlinux.org/CVE-2026-4001"]);
+    // (b) de vaste set is zeven met de Alpine-vorm; extra's komen ná de vaste links
+    const regel40 = distributeurRegels([cveExtra])[0];
+    check("extra-trackers: regel bevat de zeven vaste links incl. Alpine en daarna de extra's",
+      [regel40.includes("Alpine https://security.alpinelinux.org/vuln/CVE-2026-4001"),
+       regel40.endsWith("Rocky Linux https://sig-security.rocky.page/issues/CVE-2026-4001/ · Arch Linux https://security.archlinux.org/CVE-2026-4001")],
+      [true, true]);
+    // (c) zonder referenties: alleen de vaste zeven, geen losse scheidingstekens
+    check("extra-trackers: CVE zonder referentielijst levert alleen de vaste set",
+      distributeurRegels([{ id: "CVE-2026-4002" }])[0].endsWith(
+        "Alpine https://security.alpinelinux.org/vuln/CVE-2026-4002"), true);
+    // (d) compactie verliest de extra-trackerreferentie niet: als score-3-
+    //     referentie stond hij buiten de kap van zes en zou hij na
+    //     geschiedenisherstel ontbreken; de Set dedupt op identiteit, dus
+    //     een in de basis zittende extra komt niet twee keer mee
+    const groot40 = {
+      id: "CVE-2026-4003",
+      references: [
+        { url: "https://x/1", tags: ["Vendor Advisory"] },
+        { url: "https://x/2" }, { url: "https://x/3" }, { url: "https://x/4" },
+        { url: "https://x/5" }, { url: "https://x/6" }, { url: "https://x/7" },
+        { url: "https://x/8" },
+        { url: "https://sig-security.rocky.page/issues/CVE-2026-4003/" },
+      ],
+    };
+    const refs40 = compactAdvisory(groot40).references.map((r) => r.url);
+    check("extra-trackers: compactAdvisory houdt de Rocky-referentie naast de kap van zes",
+      [refs40.length, refs40.includes("https://sig-security.rocky.page/issues/CVE-2026-4003/"),
+       new Set(refs40).size],
+      [7, true, 7]);
+    // (e) dynamisch: Alpine staat altijd in het blok, Rocky alleen mét referentie
+    setAdvisories([cvePatch("CVE-2026-1", "nginx", "1.31.9")]);
+    check("extra-trackers: advisory-blok toont Alpine zonder dat er iets voor nodig is",
+      buildMarkdown().includes("https://security.alpinelinux.org/vuln/CVE-2026-1"), true);
+    setAdvisories([{ ...cvePatch("CVE-2026-1", "nginx", "1.31.9"),
+      references: [{ url: "https://sig-security.rocky.page/issues/CVE-2026-1/" }] }]);
+    check("extra-trackers: Rocky-referentie in de gegevens verschijnt in het advisory-blok",
+      buildMarkdown().includes("https://sig-security.rocky.page/issues/CVE-2026-1/"), true);
+    setAdvisories([]); // stub-hygiëne
+  }
+
+  // ---------- 41. paged.js in de printdialoog (optie 3) ----------
+  // De polyfill leeft in het printdocument en wordt pas gestart ná de
+  // plaatjeswacht. De stub simuleert wat de browser meldt: script geladen
+  // (met én zonder window.Paged), script mislukt, en als slechtste geval
+  // een CDN die niets terugmeldt (watchdog). De plaatjeswacht zelf wordt in
+  // sectie 27 getest; hier zijn de beelden daarom compleet.
+  {
+    const oorsprPrint41 = sandbox.document.createElement;
+    const mkPagedEnv = () => {
+      const prints = [];
+      const el = {
+        style: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; },
+        listeners: {}, addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
+        removed: false, remove() { this.removed = true; },
+        contentWindow: {
+          document: { open: noop, write: noop, close: noop, images: [{ complete: true }] },
+          prints, focus: noop, print() { prints.push("print"); },
+          addEventListener: noop, removeEventListener: noop,
+        },
+      };
+      sandbox.document.createElement = () => el;
+      return el;
+    };
+    setLastMarkdown("paged-test");
+
+    // (a) paged beschikbaar: eerst pagineren (pdfStartPaged precies één
+    //     keer), printen pas als de paginering zich meldt (pdfPagedAf)
+    const elA = mkPagedEnv();
+    let startsA = 0;
+    exportPdfPrinten();
+    elA.contentWindow.Paged = { Previewer: class { preview() { return Promise.resolve(); } } };
+    elA.contentWindow.pdfStartPaged = () => { startsA++; };
+    elA.contentWindow.pdfPagedScriptKlaar(); // script geladen, Paged aanwezig
+    elA.onload(); // beelden compleet → beide seinen binnen
+    await new Promise((r) => setTimeout(r, 10));
+    const printsVoorAf = elA.contentWindow.prints.length;
+    elA.contentWindow.pdfPagedAf(); // paginering klaar
+    await new Promise((r) => setTimeout(r, 320));
+    check("paged: beschikbare polyfill paginéért eerst en print pas ná de paginering",
+      [startsA, printsVoorAf, elA.contentWindow.prints.length], [1, 0, 1]);
+
+    // (b) script geladen maar Paged-object afwezig (SRI-verwerping): kaal
+    const elB = mkPagedEnv();
+    exportPdfPrinten();
+    elB.contentWindow.pdfPagedScriptKlaar(); // window.Paged ontbreekt hier
+    elB.onload();
+    await new Promise((r) => setTimeout(r, 320));
+    check("paged: script geladen zonder Paged-object printt kaal (browser-paginering)",
+      elB.contentWindow.prints.length, 1);
+
+    // (c) volgorde-onafhankelijk: beelden eerst, script daarna — print pas
+    //     bij beide seinen, en de start gebeurt precies één keer
+    const elC = mkPagedEnv();
+    let startsC = 0;
+    exportPdfPrinten();
+    elC.contentWindow.Paged = {};
+    elC.contentWindow.pdfStartPaged = () => { startsC++; };
+    elC.onload(); // beelden eerst
+    await new Promise((r) => setTimeout(r, 320));
+    const printsVoorScript = elC.contentWindow.prints.length;
+    elC.contentWindow.pdfPagedScriptKlaar(); // daarna het script
+    await new Promise((r) => setTimeout(r, 10));
+    elC.contentWindow.pdfPagedScriptKlaar(); // dubbel melden mag niet opnieuw starten
+    await new Promise((r) => setTimeout(r, 10));
+    elC.contentWindow.pdfPagedAf();
+    await new Promise((r) => setTimeout(r, 320));
+    check("paged: beelden en script in elke volgorde, print pas bij beide en start precies één keer",
+      [printsVoorScript, startsC, elC.contentWindow.prints.length], [0, 1, 1]);
+
+    // (d) CDN meldt niets: de watchdog bevrijdt de dialoog na 4 s
+    const elD = mkPagedEnv();
+    exportPdfPrinten();
+    elD.onload(); // geen enkel paged-sein
+    await new Promise((r) => setTimeout(r, 4500)); // watchdog 4 s + printvertraging + marge
+    check("paged: een CDN die niet laadt noch faalt, houdt de dialoog hooguit de watchdog-duur vast",
+      elD.contentWindow.prints.length, 1);
+
+    // (e) bedrading: de polyfill leeft in het printdocument (jsDelivr,
+    //     sha256-SRI, auto:false) en niet op de app-pagina; de watchdog
+    //     wordt afgelast zodra de paginering zelf loopt
+    check("paged: polyfill met sha256-SRI en auto:false in het printdocument, app-pagina blijft paged-vrij",
+      [src.includes("pagedjs@0.4.3/dist/paged.polyfill.min.js"),
+       /PAGED_SRI = "sha256-[A-Za-z0-9+/=]{40,}"/.test(src),
+       src.includes("PagedConfig = { auto: false }"),
+       /PAGED_HTML \+/.test(src),
+       !htmlSrc.includes("pagedjs")],
+      [true, true, true, true, true]);
+    check("paged: watchdog dekt alleen de scriptfase en wordt afgelast bij start van de paginering",
+      [/PAGED_WATCHDOG_MS = 4000/.test(src),
+       /clearTimeout\(pagedWatchdog\)/.test(src),
+       /w\.pdfPagedAf = \(\) => printNu\(\)/.test(src)],
+      [true, true, true]);
+    sandbox.document.createElement = oorsprPrint41;
+    setLastMarkdown("");
+  }
+
+  // ---------- 42. Beschrijvingstaal (optie 2: meertaligheid) ----------
+  // De taalkeuze gaat alleen over de OPGEHAALDE beschrijving (kaart en
+  // Technische Details); de brief en de UI blijven Nederlands. Getest: de
+  // keuzeregels van kiesBeschrijving (exact, streektaal, hoofdtalige, EN-
+  // terugval, eerste als laatste redmiddel), taalVoorkeur uit het veld of
+  // de browser, de dynamische advisory-tekst per voorkeur inclusief
+  // handmatige voorrang, en compactiebehoud van het taalkeuze-exemplaar.
+  {
+    const desc = cachedStub("#taal-select");
+    const meertalig = [
+      { lang: "en", value: "EN-tekst" },
+      { lang: "nl", value: "NL-tekst" },
+      { lang: "fr", value: "FR-tekst" },
+    ];
+    // (a) keuzeregels: exact, streektaal en hoofdtalige; lege lijst is null
+    check("taal: kiesBeschrijving kiest exact, dan streektaal, dan hoofdtalige",
+      [kiesBeschrijving(meertalig, "nl").value, kiesBeschrijving(meertalig, "en").value,
+       kiesBeschrijving([{ lang: "nl-BE", value: "VL-tekst" }, { lang: "en", value: "EN-tekst" }], "nl").value,
+       kiesBeschrijving([], "nl")],
+      ["NL-tekst", "EN-tekst", "VL-tekst", null]);
+    // (b) terugvalroute: geen NL en geen EN → eerste beschrijving (oud gedrag
+    //     behouden: een CVE zonder voorkeurexemplaar valt op dezelfde tekst
+    //     terug als vóór de taalkeuze bestond)
+    check("taal: zonder voorkeur- of EN-exemplaar valt de keuze terug op de eerste",
+      [kiesBeschrijving(meertalig, "de").value,
+       kiesBeschrijving([{ lang: "fr", value: "FR-only" }, { lang: "nl", value: "NL-tekst" }], "en").value,
+       kiesBeschrijving([{ lang: "", value: "   " }, { lang: "nl", value: "NL" }], "en").value],
+      ["EN-tekst", "FR-only", "NL"]);
+    // (c) taalVoorkeur: vaste keuzes uit het veld, auto volgt de browser
+    const origNav42 = sandbox.navigator;
+    desc.value = "nl";
+    const vastNl = taalVoorkeur();
+    desc.value = "en";
+    const vastEn = taalVoorkeur();
+    desc.value = "auto";
+    sandbox.navigator = { language: "nl-NL" };
+    const autoNl = taalVoorkeur();
+    sandbox.navigator = { language: "en-GB" };
+    const autoEn = taalVoorkeur();
+    sandbox.navigator = {}; // sandbox-standaard: geen taal → Engels
+    const autoLeeg = taalVoorkeur();
+    check("taal: taalVoorkeur volgt het veld, bij auto de browser (nl-* → nl, anders en)",
+      [vastNl, vastEn, autoNl, autoEn, autoLeeg], ["nl", "en", "nl", "en", "en"]);
+    // (d) dynamisch: de advisory-tekst volgt de voorkeur, handmatig gaat voor
+    const tweetalig = {
+      id: "CVE-2026-4201",
+      descriptions: [{ lang: "en", value: "EN-beschrijving" }, { lang: "nl", value: "NL-beschrijving" }],
+      metrics: { cvssMetricV31: [{ type: "Primary", cvssData: { baseScore: 5, baseSeverity: "MEDIUM", vectorString: "V" } }] },
+      references: [{ url: "https://example.com/4201" }],
+    };
+    desc.value = "nl";
+    setAdvisories([{ ...tweetalig }]);
+    check("taal: voorkeur NL zet de Nederlandse beschrijving in Technische Details",
+      buildMarkdown().includes("**CVE-2026-4201:** NL-beschrijving"), true);
+    desc.value = "en";
+    check("taal: voorkeur EN zet het Engelse exemplaar in Technische Details",
+      buildMarkdown().includes("**CVE-2026-4201:** EN-beschrijving"), true);
+    setAdvisories([{ ...tweetalig, _descEdit: "Eigen tekst" }]);
+    check("taal: een handmatig bewerkte beschrijving gaat boven élke taalkeuze",
+      buildMarkdown().includes("**CVE-2026-4201:** Eigen tekst"), true);
+    // (e) compactiebehoud: bij voorkeur NL overleeft het NL-exemplaar de
+    //     compactie (eerste + Engels + taalkeuze) en is de advisory na
+    //     compactie woord-voor-woord hetzelfde
+    desc.value = "nl";
+    const compact42 = compactAdvisory({ ...tweetalig });
+    check("taal: compactAdvisory behoudt bij voorkeur NL ook het Nederlandse exemplaar",
+      compact42.descriptions.map((d) => d.lang).includes("nl"), true);
+    setAdvisories([{ ...tweetalig }]); // handmatige bewerking uit (d) weer eraf
+    const mdVoor42 = buildMarkdown();
+    setAdvisories([compact42]);
+    check("taal: vóór en ná compactie dezelfde NL-advisory (herstel verliest de taal niet)",
+      buildMarkdown() === mdVoor42, true);
+    // (f) bedrading: veld in de HTML met drie opties, onthouden in het
+    //     veldgeheugen, en de kaarten worden bij een wissel ververst
+    check("taal: select in HTML met drie opties, veldgeheugen en kaartverversing bedraad",
+      [/id="taal-select"/.test(htmlSrc) && /for="taal-select"/.test(htmlSrc),
+       /<option value="auto"[^>]*>Automatisch \(browsertaal\)<\/option>/.test(htmlSrc) &&
+       /<option value="nl"[^>]*>Nederlands \(waar beschikbaar\)<\/option>/.test(htmlSrc) &&
+       /<option value="en"[^>]*>Engels<\/option>/.test(htmlSrc),
+       src.includes('"prioriteit-select", "taal-select",') && src.includes('id !== "taal-select"'),
+       /taalSelect[\s\S]{0,200}renderCveCards\(\)/.test(src)],
+      [true, true, true, true]);
+    // (g) de voorkeur reist níet mee in het veldsnapshot: filter opgenomen
+    check("taal: beschrijvingstaal blijft buiten het geschiednissnapshot (weergavekeuze)",
+      Object.prototype.hasOwnProperty.call(captureFields(), "taal-select"), false);
+    // stub-hygiëne: taalkeuze en advisories terug op de oude defaults
+    desc.value = "";
+    sandbox.navigator = origNav42;
+    setAdvisories([]);
+  }
+
+  // ---------- 43. Interfacetaal (optie 2, volledig) ----------
+  // De bediening (labels, knoppen, statusmeldingen, kaarten, geschiedenis)
+  // volgt het veld #ui-taal; de brief blijft Nederlands. De uiTaal-auto
+  // volgt de browser en valt zonder browsertaal terug op Nederlands (de
+  // sandbox heeft geen taal, dus alle eerdere secties blijven Nederland-
+  // stalig lopen). Deze sectie is de enige die naar het Engels schakelt
+  // en laat veld, browser-stub en status daarom netjes achter.
+  {
+    const veld43 = cachedStub("#ui-taal");
+    const statusEl43 = cachedStub("#status");
+    const origNav43 = sandbox.navigator;
+    const origQSA43 = sandbox.document.querySelectorAll;
+    const mk43 = (attrs) => {
+      const el = stubEl();
+      el.attrs = { ...attrs };
+      el.getAttribute = (k) => (k in el.attrs ? el.attrs[k] : null);
+      return el;
+    };
+    // (a) uiTaal: vaste keuzes uit het veld; bij auto de browser (elke
+    //     andere taal dan nl wordt Engels) en zonder taal de moedertaal
+    veld43.value = "en"; const en43 = uiTaal();
+    veld43.value = "nl"; const nl43 = uiTaal();
+    veld43.value = "auto";
+    sandbox.navigator = { language: "en-GB" }; const autoEn43 = uiTaal();
+    sandbox.navigator = { language: "nl-BE" }; const autoNl43 = uiTaal();
+    sandbox.navigator = { language: "de-DE" }; const autoDe43 = uiTaal();
+    sandbox.navigator = {}; const autoLeeg43 = uiTaal();
+    check("taal: uiTaal volgt het veld; auto volgt de browser, zonder taal blijft nl",
+      [en43, nl43, autoEn43, autoNl43, autoDe43, autoLeeg43],
+      ["en", "nl", "en", "nl", "en", "nl"]);
+    // (b) T: woordenboek per taal, {placeholder}-vulling en de valroute op
+    //     een onbekende sleutel (de sleutel zelf terug, niet leeg)
+    veld43.value = "en";
+    const enT = [T("knop.ophalen"), T("gen.voortgang", { id: "CVE-1", i: 2, n: 5 })];
+    veld43.value = "nl";
+    const nlT = [T("knop.ophalen"), T("gen.voortgang", { id: "CVE-1", i: 2, n: 5 })];
+    check("taal: T vertaalt EN en NL, vult aan en laat een onbekende sleutel als sleutel zien",
+      [enT[0], enT[1], nlT[0], nlT[1], T("sleutel.die.iets.is")],
+      ["Fetch & generate", "Fetching CVE-1 — 2/5 done...",
+       "Ophalen & genereren", "Ophalen CVE-1 — 2/5 voltooid...", "sleutel.die.iets.is"]);
+    // (c) runtime-teksten meetalen: de CVE-status op de kaart
+    veld43.value = "en";
+    const enStatus = cveStatus({ vulnStatus: "rejected" });
+    veld43.value = "nl";
+    const nlStatus = cveStatus({ vulnStatus: "rejected" });
+    check("taal: CVE-statuslabel en notitie volgen de interface-taal",
+      [enStatus.label, enStatus.note, nlStatus.label, nlStatus.note],
+      ["Rejected",
+       "This CVE was rejected by the CNA — check that the right number was used.",
+       "Afgewezen",
+       "Deze CVE is door de CNA afgewezen (rejected) — controleer of het juiste nummer is gebruikt."]);
+    // (d) de kaarten in de andere taal: een mislukte kaart in het Engels
+    //     en in het Nederlands (kaartinhoud via de opgevangen div-stub)
+    const oorsprCel43 = sandbox.document.createElement;
+    const cellen43 = [];
+    sandbox.document.createElement = (tag) => { const el = oorsprCel43(tag); if (tag === "div") cellen43.push(el); return el; };
+    setAdvisories([{ id: "CVE-2026-4301", _fetchFailed: true }]);
+    veld43.value = "en"; renderCveCards();
+    const enKaart = cellen43.some((el) => String(el.innerHTML).includes("No data"));
+    veld43.value = "nl"; renderCveCards();
+    const nlKaart = cellen43.some((el) => String(el.innerHTML).includes("Geen gegevens"));
+    sandbox.document.createElement = oorsprCel43;
+    setAdvisories([]);
+    check("taal: kaarten tonen de taaleigen labels (No data / Geen gegevens)",
+      [enKaart, nlKaart], [true, true]);
+    // (e) vertaalUi: statieveel, titel, aria en html-taal gaan mee; de
+    //     stub-elementen dragen hun data-i18n-sleutels in attrs
+    const knop43 = mk43({ "data-i18n": "knop.retry", "data-i18n-title": "knop.retry.title" });
+    const veldTekst43 = mk43({ "data-i18n-ph": "ph.titel" });
+    const afdruk43 = mk43({ "data-i18n-html": "footer" });
+    const titel43 = mk43({ "data-i18n-aria": "raw.aria" });
+    sandbox.document.querySelectorAll = () => [knop43, veldTekst43, afdruk43, titel43];
+    veld43.value = "en"; vertaalUi();
+    const naEn = [knop43.textContent, knop43.attrs.title, veldTekst43.attrs.placeholder,
+      String(afdruk43.innerHTML).includes("Data sources:"),
+      String(titel43.attrs["aria-label"]).includes("Advisory text in Markdown"),
+      sandbox.document.documentElement.lang];
+    sandbox.document.querySelectorAll = origQSA43;
+    veld43.value = "nl"; vertaalUi(); // documentElement terug op nl
+    check("taal: vertaalUi zet teksten, titels, aria-labels en de html-taal",
+      naEn,
+      ["Try again",
+       "Fetch everything again: retries failed sources and failed numbers (successful numbers come from the cache)",
+       "Critical vulnerabilities in nginx", true, true, "en"]);
+    // (f) statusmeldingen op woordenboeksleutel worden bij een taalwissel
+    //     herschreven (samengestelde meldingen blijven in hun eigen taal)
+    statusT("hist.gewist"); // nog in het Nederlands
+    const nlStatus43 = statusEl43.textContent;
+    veld43.value = "en"; herhaalStatus();
+    check("taal: een woordenboekstatus wordt bij taalwissel in het Engels herschreven",
+      [nlStatus43, statusEl43.textContent], ["Geschiedenis gewist.", "History cleared."]);
+    // (g) het veld is bedraad: veranderen van taal vertaalt direct — html-
+    //     taal én statusregel gaan mee. Dit is precies de ontbrekende
+    //     handler achter de klacht "Engels kiezen doet niets".
+    for (const fn of cachedStub("#ui-taal").listeners.change) fn();
+    const naHandler = [sandbox.document.documentElement.lang, statusEl43.textContent];
+    veld43.value = "nl";
+    for (const fn of cachedStub("#ui-taal").listeners.change) fn();
+    check("taal: veranderen van interface-taal vertaalt de app direct (change-handler)",
+      naHandler, ["en", "History cleared."]);
+    // (h) het veld is een kijkinstelling: onthouden tussen sessies (nl in
+    //     MEMORIZED_FIELDS), maar niet bevroren in geschiedenis/deellink
+    check("taal: interfacetaal onthouden en niet bevroren in het veldsnapshot",
+      [src.includes('"ui-taal"') && src.includes('id !== "ui-taal"'),
+       Object.prototype.hasOwnProperty.call(captureFields(), "ui-taal")],
+      [true, false]);
+    // (i) de bedrading in de html: select met label en drie opties, plus
+    //     de vertaal-attributen over de hele pagina
+    check("taal: interfacetaalselect met drie opties en tientallen data-i18n-attributen in de pagina",
+      [/<select id="ui-taal"[\s\S]*?<\/select>/.test(htmlSrc) && /<label for="ui-taal"/.test(htmlSrc),
+       /<option value="en"[^>]*>English<\/option>/.test(htmlSrc),
+       (htmlSrc.match(/data-i18n/g) || []).length >= 40],
+      [true, true, true]);
+    // achterlaten in de standaardstaat: automatische taallijn, Nederlands
+    veld43.value = ""; sandbox.navigator = origNav43; statusEl43.textContent = "";
+  }
+
 })();
+
+// ---- registratie bij node:test: één ouder-test, daarin 315 subtests ----
+// (TAP-telling: de ouder-test telt mee als test; samen met de 13 CVSS-cases
+// rapporteert `node --test` daarmee 329 tests — de waarheid is het aantal
+// check()-aanroepen, niet een handmatige optelling.)
+// De asynchrone secties (11 t/m 39) lopen nog als dit bestand synchroon is
+// uitgelopen; registratie vóórdat die cases bestaan kan niet, en node:test
+// negeert testaanroepen die ná afloop van de root-test binnenkomen. Daarom
+// één ouder-test die synchroon wordt aangemaakt, daarin de suite-promise
+// afwacht en daarna pas de subtests aanmaakt: het proces blijft live en
+// elke case krijgt zijn eigen TAP-regel. Een gooiende sectie laat de
+// suite-promise afwijzen: de ouder-test faalt dan met die fout, in plaats
+// van dat process.exit stilzwijgend vertrok.
+// Bestendig afsluiten: zolang de ouder-test loopt, mag de event loop niet
+// leeglopen. De Node-testrunner anders op het race-moment tussen de laatste
+// timer van de suite en de (microtask-)registratie van de subtests greep
+// in, met als foutmelding "Promise resolution is still pending but the
+// event loop has already resolved". Het interval wordt gewist zodra de
+// ouder-test is afgerond (ook bij een afwijzende suite-promise).
+const levendHouden = setInterval(() => {}, 1000);
+tapTest("advisory-writer UI-suite", async (t) => {
+  try {
+    await kantEnKlaar;
+    // Nazwemmers van de app weg halen vóór de registratie: timers die de
+    // app tijdens de suite plantte en nooit meer nodig heeft (de 120-s-
+    // opruimtimer van de printdialoog, een losse aria-busy-debounce) mogen
+    // het afsluiten niet meer kunnen rekken of verstoren.
+    for (const id of sandboxOpenTimers) clearTimeout(id);
+    sandboxOpenTimers.clear();
+    for (const c of cases) {
+      await t.test(c.name, () => {
+        if (!c.ok) throw new Error(c.msg);
+      });
+    }
+  } finally {
+    clearInterval(levendHouden);
+  }
+});

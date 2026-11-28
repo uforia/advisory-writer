@@ -1,0 +1,10 @@
+{
+  "name": "advisory-writer",
+  "version": "1.0.0",
+  "description": "Advisories in Dutch or English from CVE numbers",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/",
+    "test:tap": "node --test --test-reporter=tap test/"
+  }
+}
